@@ -54,7 +54,10 @@ For Years 2013-2022 (which are the years overlapping for each)
 ZIP5 Level
 
 ```{r}
-census_api_key("YOUR_API_KEY", install = TRUE)
+
+api_key <- read_file("census_api_key.txt")
+
+census_api_key(api_key, install = TRUE)
 
 years <- 2013:2022
 
@@ -95,7 +98,8 @@ census_data <- map_df(years, function(year) {
   mutate(year = year)                        
 })
 
- 
-head(census_data)
+census_data= census_data %>%
+  select(-NAME)
+
 ```
 

@@ -73,3 +73,12 @@ census_data <- map_df(years, function(year) {
 head(census_data)
 ```
 
+```{r}
+names(census_data)
+
+census_data= census_data %>%
+  select(-NAME)
+
+write.csv(census_data, "census_data_2013_2022.csv")
+```
+
