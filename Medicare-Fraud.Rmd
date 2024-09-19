@@ -101,5 +101,46 @@ census_data <- map_df(years, function(year) {
 census_data= census_data %>%
   select(-NAME)
 
+
+headers <- headers(res)
+print(headers)
+
+```
+
+
+### Trying to get all cms data using API
+
+
+
+```{r}
+get_paginated_data <- function(base_url, size = 5000) {
+  offset <- 0
+  all_data <- list()
+  
+  repeat {
+    res <- GET(paste0(base_url, "?size=", size, "&offset=", offset))
+    data <- fromJSON(rawToChar(res$content))
+    
+    if (length(data) == 0) break  # Stop if no more data
+    
+    all_data <- append(all_data, list(data))
+    offset <- offset + size
+  }
+  
+  return(bind_rows(all_data))
+}
+
+# Base URLs for each dataset
+url_1 <- "https://data.cms.gov/data-api/v1/dataset/76a714ad-3a2c-43ac-b76d-9dadf8f7d890/data"
+url_2 <- "https://data.cms.gov/data-api/v1/dataset/9552739e-3d05-4c1b-8eff-ecabf391e2e5/data"
+url_3 <- "https://data.cms.gov/data-api/v1/dataset/c8ea3f8e-3a09-4fea-86f2-8902fb4b0920/data"
+url_4 <- "https://data.cms.gov/data-api/v1/dataset/1746a83e-bb65-4300-8e02-21edbab77c6b/data"
+
+# Retrieve data for each dataset
+Medicare_Part_B <- get_paginated_data(url_1)
+Medicare_Part_D_Prov <- get_paginated_data(url_2)
+Medicare_Part_D_Geo <- get_paginated_data(url_3)
+DMEPOS <- get_paginated_data(url_4)
+
 ```
 
