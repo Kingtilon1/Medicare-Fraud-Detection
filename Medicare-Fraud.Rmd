@@ -25,10 +25,10 @@ library(purrr)
 ```{r}
 
 
-res = GET("https://data.cms.gov/data-api/v1/dataset/76a714ad-3a2c-43ac-b76d-9dadf8f7d890/data")
-res1 = GET("https://data.cms.gov/data-api/v1/dataset/9552739e-3d05-4c1b-8eff-ecabf391e2e5/data")
-res2 = GET("https://data.cms.gov/data-api/v1/dataset/c8ea3f8e-3a09-4fea-86f2-8902fb4b0920/data")
-res3 = GET("https://data.cms.gov/data-api/v1/dataset/1746a83e-bb65-4300-8e02-21edbab77c6b/data")
+res = GET("https://data.cms.gov/data-api/v1/dataset/92396110-2aed-4d63-a6a2-5d6207d46a29/data?size=5000")
+res1 = GET("https://data.cms.gov/data-api/v1/dataset/9552739e-3d05-4c1b-8eff-ecabf391e2e5/data?size=5000&offset=12000" )
+res2 = GET("https://data.cms.gov/data-api/v1/dataset/c8ea3f8e-3a09-4fea-86f2-8902fb4b0920/data?size=5000")
+res3 = GET("https://data.cms.gov/data-api/v1/dataset/1746a83e-bb65-4300-8e02-21edbab77c6b/data?size=5000")
 ```
 
 
@@ -36,10 +36,10 @@ res3 = GET("https://data.cms.gov/data-api/v1/dataset/1746a83e-bb65-4300-8e02-21e
 ### Retreive CMS Data
 
 ```{r}
-Medicare_Part_B=fromJSON(rawToChar(res$content))
-Medicare_Part_D_Prov=fromJSON(rawToChar(res1$content))
+Medicare=fromJSON(rawToChar(res$content))
+Medicare_Part_D_Pro=fromJSON(rawToChar(res1$content))
 Medicare_Part_D_Geo=fromJSON(rawToChar(res2$content))
-DMEPOS=fromJSON(rawToChar(res3$content))
+DMEPOSS=fromJSON(rawToChar(res3$content))
 ```
 
 ### Retreive LIEI data
@@ -48,6 +48,149 @@ DMEPOS=fromJSON(rawToChar(res3$content))
 Liei <- read.csv("https://raw.githubusercontent.com/Kingtilon1/Medicare-Fraud-Detection/refs/heads/main/LIEI_UPDATED_Sept_2024.csv")
 ```
 
+
+
+
+
+```{r}
+Medicare_Part_B <- Medicare %>%
+  select(
+    Npi = Rndrng_NPI,
+    Provider_type = Rndrng_Prvdr_Type,
+    Nppes_provider_gender = Rndrng_Prvdr_Gndr,
+    Line_srvc_cnt = Tot_Srvcs,
+    Bene_unique_cnt = Tot_Benes,
+    Bene_day_srvc_cnt = Tot_Bene_Day_Srvcs,
+    Average_submitted_chrg_amt = Avg_Sbmtd_Chrg,
+    Average_medicare_payment_amt = Avg_Mdcr_Pymt_Amt
+  )
+```
+
+
+```{r}
+Medicare_Part_D <- Medicare_Part_D_Pro %>%
+  select(
+    Npi = Prscrbr_NPI,
+    Specialty_description = Prscrbr_Type,
+    Bene_count = Tot_Benes,
+    Total_claim_count = Tot_Clms,
+    Total_30_day_fill_count = Tot_30day_Fills,
+    Total_day_supply = Tot_Day_Suply,
+    Total_drug_cost = Tot_Drug_Cst
+  )
+
+```
+
+
+```{r}
+DMEPOS <- DMEPOSS %>%
+  select(
+    Referring_npi = Suplr_NPI,  
+    Referring_provider_type = Suplr_Prvdr_Spclty_Desc, 
+    Referring_provider_gender = Suplr_Prvdr_Gndr,  
+    Number_of_suppliers = Tot_Suplr_Srvcs,  
+    Number_of_supplier_beneficiaries = Tot_Suplr_Benes,  
+    Number_of_supplier_claims = Tot_Suplr_Clms,
+    Number_of_supplier_services = Tot_Suplr_Srvcs, 
+    Avg_supplier_submitted_charge = Avg_Suplr_Sbmtd_Chrg,  
+    Avg_supplier_medicare_pmt_amt = Avg_Suplr_Mdcr_Pymt_Amt
+  )
+```
+
+```{r}
+Medicare_Part_D$Npi <- as.integer(trimws(Medicare_Part_D$Npi))
+Medicare_Part_B$Npi <- as.integer(trimws(Medicare_Part_B$Npi))
+DMEPOS$Referring_npi <- as.integer(trimws(DMEPOS$Referring_npi))
+```
+
+
+### Join the LEIE data to each data set based on the matching npi code
+```{r}
+Medicare_Part_D$Exclusion <- ifelse(Medicare_Part_D$Npi %in% Liei$NPI, 1, 0)
+Medicare_Part_B$Exclusion <- ifelse(Medicare_Part_B$Npi %in% Liei$NPI, 1, 0)
+DMEPOS$Exclusion <- ifelse(DMEPOS$Referring_npi %in% Liei$NPI, 1, 0)
+```
+
+
+
+```{r}
+base_url <- "https://data.cms.gov/data-api/v1/dataset/9552739e-3d05-4c1b-8eff-ecabf391e2e5/data"
+
+retrieve_data <- function(size, offset) {
+  url <- paste0(base_url, "?size=", size, "&offset=", offset)
+  res <- GET(url)
+  Medicare <- fromJSON(rawToChar(res$content))
+  return(Medicare)  # Adjust based on the actual structure of the response
+}
+
+# Loop through to get all data
+all_data <- data.frame()
+offset <- 0
+size <- 5000
+
+repeat {
+  new_data <- retrieve_data(size, offset)
+  
+  # Print statement to track progress
+  cat("Fetching data with offset:", offset, "Number of rows retrieved:", nrow(new_data), "\n")
+  
+  if (nrow(new_data) == 0) break  # Exit if no more data
+  
+  all_data <- rbind(all_data, new_data)
+  offset <- offset + size  # Increment the offset for the next request
+}
+```
+
+```{r}
+npi_vector <- unique(all_data$Suplr_NPI)  # Adjust column name as necessary
+# Function to check for matching NPIs
+check_matches <- function(target_data, npi_vector) {
+  target_data$match <- ifelse(target_data$NPI %in% npi_vector, 1, 0)  # Adjust column name
+  return(target_data)
+}
+
+# Example usage with a target dataset
+matched_data <- check_matches(Liei, npi_vector)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ### Retreive Census Data
 
 For Years 2013-2022 (which are the years overlapping for each)
@@ -55,10 +198,12 @@ ZIP5 Level
 
 ```{r}
 
-api_key <- read_file("census_api_key.txt")
+api_key <- "f06f71d603f36419f4e0b03b2ac199c4157468e4"
 
 census_api_key(api_key, install = TRUE)
+```
 
+```{r}
 years <- 2013:2022
 
 variables <- c(
@@ -143,4 +288,3 @@ Medicare_Part_D_Geo <- get_paginated_data(url_3)
 DMEPOS <- get_paginated_data(url_4)
 
 ```
-
