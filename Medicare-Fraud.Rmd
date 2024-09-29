@@ -11,10 +11,14 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r}
 library(httr)
 library(jsonlite)
-
+library(sparklyr)
 library(tidycensus)
 library(dplyr)
 library(purrr)
+library(DBI)
+library(RMySQL)
+options(rstudio.connectionObserver.errorsSuppressed = TRUE)
+
 
 ```
 
@@ -26,7 +30,6 @@ library(purrr)
 
 
 res = GET("https://data.cms.gov/data-api/v1/dataset/92396110-2aed-4d63-a6a2-5d6207d46a29/data?size=5000")
-res1 = GET("https://data.cms.gov/data-api/v1/dataset/9552739e-3d05-4c1b-8eff-ecabf391e2e5/data?size=5000&offset=12000" )
 res2 = GET("https://data.cms.gov/data-api/v1/dataset/c8ea3f8e-3a09-4fea-86f2-8902fb4b0920/data?size=5000")
 res3 = GET("https://data.cms.gov/data-api/v1/dataset/1746a83e-bb65-4300-8e02-21edbab77c6b/data?size=5000")
 ```
@@ -37,7 +40,7 @@ res3 = GET("https://data.cms.gov/data-api/v1/dataset/1746a83e-bb65-4300-8e02-21e
 
 ```{r}
 Medicare=fromJSON(rawToChar(res$content))
-Medicare_Part_D_Pro=fromJSON(rawToChar(res1$content))
+Medicare_Part_D_Pro=read.csv("https://raw.githubusercontent.com/Kingtilon1/Medicare-Fraud-Detection/refs/heads/main/agg_cms_partD_byProvider.csv")
 Medicare_Part_D_Geo=fromJSON(rawToChar(res2$content))
 DMEPOSS=fromJSON(rawToChar(res3$content))
 ```
@@ -47,9 +50,6 @@ DMEPOSS=fromJSON(rawToChar(res3$content))
 ```{r}
 Liei <- read.csv("https://raw.githubusercontent.com/Kingtilon1/Medicare-Fraud-Detection/refs/heads/main/LIEI_UPDATED_Sept_2024.csv")
 ```
-
-
-
 
 
 ```{r}
@@ -113,33 +113,7 @@ DMEPOS$Exclusion <- ifelse(DMEPOS$Referring_npi %in% Liei$NPI, 1, 0)
 
 
 
-```{r}
-base_url <- "https://data.cms.gov/data-api/v1/dataset/9552739e-3d05-4c1b-8eff-ecabf391e2e5/data"
 
-retrieve_data <- function(size, offset) {
-  url <- paste0(base_url, "?size=", size, "&offset=", offset)
-  res <- GET(url)
-  Medicare <- fromJSON(rawToChar(res$content))
-  return(Medicare)  # Adjust based on the actual structure of the response
-}
-
-# Loop through to get all data
-all_data <- data.frame()
-offset <- 0
-size <- 5000
-
-repeat {
-  new_data <- retrieve_data(size, offset)
-  
-  # Print statement to track progress
-  cat("Fetching data with offset:", offset, "Number of rows retrieved:", nrow(new_data), "\n")
-  
-  if (nrow(new_data) == 0) break  # Exit if no more data
-  
-  all_data <- rbind(all_data, new_data)
-  offset <- offset + size  # Increment the offset for the next request
-}
-```
 
 ```{r}
 npi_vector <- unique(all_data$Suplr_NPI)  # Adjust column name as necessary
@@ -151,8 +125,6 @@ check_matches <- function(target_data, npi_vector) {
 
 # Example usage with a target dataset
 matched_data <- check_matches(Liei, npi_vector)
-
-
 ```
 
 
@@ -171,120 +143,3 @@ matched_data <- check_matches(Liei, npi_vector)
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-### Retreive Census Data
-
-For Years 2013-2022 (which are the years overlapping for each)
-ZIP5 Level
-
-```{r}
-
-api_key <- "f06f71d603f36419f4e0b03b2ac199c4157468e4"
-
-census_api_key(api_key, install = TRUE)
-```
-
-```{r}
-years <- 2013:2022
-
-variables <- c(
-  # Demographics: Race and ethnicity
-  total_population = "B02001_001",
-  white_alone = "B02001_002",
-  black_alone = "B02001_003",
-  american_indian_alone = "B02001_004",
-  asian_alone = "B02001_005",
-  hispanic_latino = "B03002_012",
-  
-  # Education
-  total_population_25_over = "B15003_001",
-  bachelors_degree = "B15003_017",
-  graduate_professional_degree = "B15003_022",
-  
-  # Language spoken at home
-  total_population_5_over = "B16001_001",
-  english_only = "B16001_002",
-  spanish = "B16001_003",
-  indo_european_languages = "B16001_006",
-  asian_pacific_languages = "B16001_009",
-  
-  # Income
-  median_income = "B19013_001"
-)
-
-
-census_data <- map_df(years, function(year) {
-  get_acs(
-    geography = "zip code tabulation area",  
-    variables = variables,                   
-    year = year,                             
-    survey = "acs5",                         
-    output = "wide"                          
-  ) %>%
-  mutate(year = year)                        
-})
-
-census_data= census_data %>%
-  select(-NAME)
-
-
-headers <- headers(res)
-print(headers)
-
-```
-
-
-### Trying to get all cms data using API
-
-
-
-```{r}
-get_paginated_data <- function(base_url, size = 5000) {
-  offset <- 0
-  all_data <- list()
-  
-  repeat {
-    res <- GET(paste0(base_url, "?size=", size, "&offset=", offset))
-    data <- fromJSON(rawToChar(res$content))
-    
-    if (length(data) == 0) break  # Stop if no more data
-    
-    all_data <- append(all_data, list(data))
-    offset <- offset + size
-  }
-  
-  return(bind_rows(all_data))
-}
-
-# Base URLs for each dataset
-url_1 <- "https://data.cms.gov/data-api/v1/dataset/76a714ad-3a2c-43ac-b76d-9dadf8f7d890/data"
-url_2 <- "https://data.cms.gov/data-api/v1/dataset/9552739e-3d05-4c1b-8eff-ecabf391e2e5/data"
-url_3 <- "https://data.cms.gov/data-api/v1/dataset/c8ea3f8e-3a09-4fea-86f2-8902fb4b0920/data"
-url_4 <- "https://data.cms.gov/data-api/v1/dataset/1746a83e-bb65-4300-8e02-21edbab77c6b/data"
-
-# Retrieve data for each dataset
-Medicare_Part_B <- get_paginated_data(url_1)
-Medicare_Part_D_Prov <- get_paginated_data(url_2)
-Medicare_Part_D_Geo <- get_paginated_data(url_3)
-DMEPOS <- get_paginated_data(url_4)
-
-```

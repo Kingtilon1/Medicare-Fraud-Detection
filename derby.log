@@ -1,0 +1,13 @@
+----------------------------------------------------------------
+Wed Sep 25 19:51:28 EDT 2024:
+Booting Derby version The Apache Software Foundation - Apache Derby - 10.14.2.0 - (1828579): instance a816c00e-0192-2b98-d0f6-0000125ff8f0 
+on database directory C:\Users\bobbt\Downloads\Medicare_Fraud\Medicare-Fraud-Detection\metastore_db with class loader sun.misc.Launcher$AppClassLoader@73f792cf 
+Loaded from file:/C:/Spark/spark-3.5.3-bin-hadoop3/jars/derby-10.14.2.0.jar
+java.vendor=Oracle Corporation
+java.runtime.version=1.8.0_421-b09
+user.dir=C:\Users\bobbt\Downloads\Medicare_Fraud\Medicare-Fraud-Detection
+os.name=Windows 11
+os.arch=amd64
+os.version=10.0
+derby.system.home=null
+Database Class Loader started - derby.database.classpath=''
