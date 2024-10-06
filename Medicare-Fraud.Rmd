@@ -24,15 +24,15 @@ The Data was too big to upload directly to R, so it was uploaded to mysql Workbe
 ```{r}
 con <- dbConnect(RMySQL::MySQL(), 
 
-                 dbname = "fraud", 
+                 dbname = "", 
 
-                 host = "localhost", 
+                 host = "", 
 
-                 port = 3306, 
+                 port = "", 
 
-                 user = "root", 
+                 user = "", 
 
-                 password = "Kidace909")
+                 password = "")
 
 dbSendQuery(con, "SET GLOBAL local_infile = true;") # <--- Added this
 
