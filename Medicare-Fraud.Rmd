@@ -1,0 +1,171 @@
+title: "Medicare Fraud"
+output: html_document
+date: "2024-09-17"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(httr)
+library(jsonlite)
+library(sparklyr)
+library(tidycensus)
+library(dplyr)
+library(purrr)
+library(DBI)
+library(knitr)
+library(RMySQL)
+library(data.table)
+options(rstudio.connectionObserver.errorsSuppressed = TRUE)
+```
+The Data was too big to upload directly to R, so it was uploaded to mysql Workbench instead for aggregation before being pulled back into R
+
+```{r}
+con <- dbConnect(RMySQL::MySQL(), 
+
+                 dbname = "fraud", 
+
+                 host = "localhost", 
+
+                 port = 3306, 
+
+                 user = "root", 
+
+                 password = "Kidace909")
+
+dbSendQuery(con, "SET GLOBAL local_infile = true;") # <--- Added this
+
+```
+
+
+
+
+```{r}
+# Open the file connection
+cons <- file("C:\\Users\\bobbt\\Downloads\\Medicare_Part_D_Prescribers_by_Provider_and_Drug_2022.csv", open = "r")
+
+# Count total lines in the file (each line corresponds to a row)
+total_rows <- 0
+while (length(line <- readLines(cons, n = 1, warn = FALSE)) > 0) {
+  total_rows <- total_rows + 1
+}
+close(cons)
+
+# Print total number of rows (including the header)
+total_rows
+```
+
+
+```{r}
+# Define the split point (half of the file)
+split_point <- total_rows / 2
+
+# Open connections for reading and writing
+input_file <- file("C:\\Users\\bobbt\\Downloads\\Medicare_Part_D_Prescribers_by_Provider_and_Drug_2022.csv", open = "r")
+output_file <- file("C:\\Users\\bobbt\\Downloads\\Medicare_Part_D_Second_Half.csv", open = "w")
+
+# Read and write the header to the second half file
+header <- readLines(input_file, n = 1)
+writeLines(header, output_file)
+
+# Skip the first half of the rows
+for (i in 2:split_point) {
+  readLines(input_file, n = 1)  # Skip rows without saving them
+}
+
+# Write the second half of the rows to the new file
+for (i in (split_point + 1):total_rows) {
+  line <- readLines(input_file, n = 1)
+  writeLines(line, output_file)
+}
+
+# Close connections
+close(input_file)
+close(output_file)
+
+```
+
+
+read medicare_part_d and leie dataset and uploiad it to 
+```{r}
+# Define the file path
+file_path <- "C:\\Users\\bobbt\\Downloads\\medicare_part_2.csv"
+leie_path <- "C:\\Users\\bobbt\\Downloads\\leie.csv"
+
+# Read the CSV file
+data <- fread(file_path)
+datas <- fread(leie_path)
+
+# Check the number of rows
+num_rows <- nrow(data)
+print(num_rows)
+
+dbWriteTable(con, "medicare_part_2_data", as.data.frame(data), overwrite = TRUE, row.names = FALSE)
+dbDisconnect(con)
+```
+
+
+
+```{r}
+dbWriteTable(con, "medicare_part_2_data", as.data.frame(data), overwrite = TRUE, row.names = FALSE)
+dbDisconnect(con)
+dbWriteTable(con, "leie", as.data.frame(datas), overwrite = TRUE, row.names = FALSE)
+```
+
+
+```{r}
+dbWriteTable(con, "leie", as.data.frame(datas), overwrite = TRUE, row.names = FALSE)
+
+```
+Import the data into data frames
+```{r}
+# Import medicare_part_b
+medicare_part_b <- dbGetQuery(con, "SELECT * FROM medicare_part_b")
+
+# Import medicare_part_d
+medicare_part_d <- dbGetQuery(con, "SELECT * FROM medicare_part_d")
+
+# Import dmepos
+dmepos <- dbGetQuery(con, "SELECT * FROM dmepos")
+
+# Import combined_dataset
+combined_dataset <- dbGetQuery(con, "SELECT * FROM combined_dataset")
+```
+
+Now lets call a function to calculate the percentage of fraudulent to non-fraudulent cases
+```{r}
+calc_fraud_stats <- function(dataset){
+  total <- nrow(dataset)
+  fraud <- sum(dataset$Exclusion == 1, na.rm = TRUE)
+  non_fraud = total - fraud
+  percent_fraud = (fraud/total) * 100
+  return(c(Non_fraudulent = non_fraud,
+           Fraudulent = fraud,
+           Percent_Fraudulent= percent_fraud))
+}
+
+part_b_stats <- calc_fraud_stats(medicare_part_b)
+part_d_stats <- calc_fraud_stats(medicare_part_d)
+dmepos_stats <- calc_fraud_stats(dmepos)
+combined_stats <- calc_fraud_stats(combined_dataset)
+
+fraud_table <- data.frame(Dataset = c("Part B", "Part D", "DMEPOS", "Combined"),
+  Non_fraudulent = c(part_b_stats["Non_fraudulent"], 
+                     part_d_stats["Non_fraudulent"], 
+                     dmepos_stats["Non_fraudulent"], 
+                     combined_stats["Non_fraudulent"]),
+  Fraudulent = c(part_b_stats["Fraudulent"], 
+                 part_d_stats["Fraudulent"], 
+                 dmepos_stats["Fraudulent"], 
+                 combined_stats["Fraudulent"]),
+  Percent_Fraudulent = c(part_b_stats["Percent_Fraudulent"], 
+                         part_d_stats["Percent_Fraudulent"], 
+                         dmepos_stats["Percent_Fraudulent"], 
+                         combined_stats["Percent_Fraudulent"]))
+
+fraud_table$Percent_Fraudulent <- round(fraud_table$Percent_Fraudulent, 3)
+kable(fraud_table, format = "markdown", digits = 3)
+```
+
+
