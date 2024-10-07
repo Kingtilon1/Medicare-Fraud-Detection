@@ -17,8 +17,13 @@ library(DBI)
 library(knitr)
 library(RMySQL)
 library(data.table)
+library(caret)
+library(pROC)
+library(ROSE)  
+library(ggplot2)
 options(rstudio.connectionObserver.errorsSuppressed = TRUE)
 ```
+
 The Data was too big to upload directly to R, so it was uploaded to mysql Workbench instead for aggregation before being pulled back into R
 
 ```{r}
@@ -289,4 +294,177 @@ for (type in provider_types) {
 combined_dataset <- combined_dataset %>%
   select(-Nppes_provider_gender, -Provider_type, -Npi)
 ```
+
+### Binomial Logistic regression
+
+#### DMEPOS
+check for na values
+```{r}
+sum(is.na(dmepos))
+```
+No NA values, lets see the distribution of the numerical columns to check for any outliers
+```{r}
+library(ggplot2)
+
+# Function to plot histograms for selected columns
+plot_histograms <- function(df, columns) {
+  for (col in columns) {
+    # Create a ggplot object
+    p <- ggplot(df, aes_string(x = col)) +
+      geom_histogram(binwidth = 30, fill = "blue", color = "black", alpha = 0.7) +
+      labs(title = paste("Histogram of", col), x = col, y = "Frequency") +
+      theme_minimal()
+    
+    # Print the plot
+    print(p)
+  }
+}
+
+# Specify the columns you want to create histograms for, ommitting the beneficiary columns, it leads to highly skewed distributions
+columns_to_plot <- c(
+  "avg_number_of_suppliers", 
+  "sum_number_of_suppliers", 
+  "stddev_number_of_suppliers",
+  "min_number_of_suppliers", 
+  "max_number_of_suppliers",
+  "avg_number_of_supplier_claims",
+  "sum_number_of_supplier_claims",
+  "stddev_number_of_supplier_claims",
+  "min_number_of_supplier_claims",
+  "max_number_of_supplier_claims",
+  "avg_number_of_supplier_services",
+  "sum_number_of_supplier_services",
+  "stddev_number_of_supplier_services",
+  "min_number_of_supplier_services",
+  "max_number_of_supplier_services",
+  "avg_supplier_submitted_charge",
+  "stddev_supplier_submitted_charge",
+  "min_supplier_submitted_charge",
+  "max_supplier_submitted_charge",
+  "avg_supplier_medicare_payment",
+  "stddev_supplier_medicare_payment",
+  "min_supplier_medicare_payment",
+  "max_supplier_medicare_payment"
+)
+
+plot_histograms(dmepos, columns_to_plot)
+
+```
+
+
+There are some outliers, a rule of thumb is to look out for values that are 1.5 times the iqr above the 75th ir te 25th percentile
+```{r}
+find_outliers_iqr <- function(df, column) {
+  Q1 <- quantile(df[[column]], 0.25, na.rm = TRUE)
+  Q3 <- quantile(df[[column]], 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  outliers <- df[[column]][df[[column]] < lower_bound | df[[column]] > upper_bound]
+  return(outliers)
+}
+
+```
+
+Im going to go through every numerical column specifieied, and call trhe find_outliers_iqr function so that every row that contains the outlier is dropped
+```{r}
+remove_outliers <- function(df, column) {
+  outliers <- find_outliers_iqr(df, column)
+  df <- df[!(df[[column]] %in% outliers), ]
+  return(df)
+}
+
+# Main loop to process all columns
+for (column in columns_to_plot) {
+  tryCatch({
+    print(paste("Processing column:", column))
+    dmepos <- remove_outliers(dmepos, column)
+    print(paste("Rows remaining after processing", column, ":", nrow(dmepos)))
+  }, error = function(e) {
+    print(paste("Error processing column:", column))
+    print(e)
+  })
+}
+```
+
+puting back benficiary coluymns to see the distirbution as well
+```{r}
+columns_to_plot <- c(
+  "avg_number_of_suppliers", 
+  "sum_number_of_suppliers", 
+  "stddev_number_of_suppliers",
+  "min_number_of_suppliers", 
+  "max_number_of_suppliers",
+  "max_number_of_supplier_beneficiaries", 
+  "avg_number_of_supplier_beneficiaries",
+  "sum_number_of_supplier_beneficiaries", 
+  "stddev_number_of_supplier_beneficiaries",
+  "min_number_of_supplier_beneficiaries",
+  "avg_number_of_supplier_claims",
+  "sum_number_of_supplier_claims",
+  "stddev_number_of_supplier_claims",
+  "min_number_of_supplier_claims",
+  "max_number_of_supplier_claims",
+  "avg_number_of_supplier_services",
+  "sum_number_of_supplier_services",
+  "stddev_number_of_supplier_services",
+  "min_number_of_supplier_services",
+  "max_number_of_supplier_services",
+  "avg_supplier_submitted_charge",
+  "stddev_supplier_submitted_charge",
+  "min_supplier_submitted_charge",
+  "max_supplier_submitted_charge",
+  "avg_supplier_medicare_payment",
+  "stddev_supplier_medicare_payment",
+  "min_supplier_medicare_payment",
+  "max_supplier_medicare_payment"
+)
+```
+
+Distribution after removing outliers
+
+
+```{r}
+generate_histograms_for_columns <- function(data, columns, output_dir = NULL, log_scale = FALSE) {
+  # Create output directory if specified
+  if (!is.null(output_dir)) {
+    dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+  }
+  
+  # List to store all plots
+  plot_list <- list()
+  
+  for (column in columns) {
+    tryCatch({
+      print(paste("Processing column:", column))
+      
+      # Generate the plot
+      plot <- generate_improved_histogram(data, column, log_scale = log_scale)
+      
+      # Add the plot to the list
+      plot_list[[column]] <- plot
+      
+      # Save the plot if output directory is specified
+      if (!is.null(output_dir)) {
+        ggsave(filename = file.path(output_dir, paste0(column, ".png")), 
+               plot = plot, width = 10, height = 6)
+      }
+      
+      # Print the plot
+      print(plot)
+      
+    }, error = function(e) {
+      warning(paste("Error processing column:", column, "\nError message:", e$message))
+    })
+  }
+  
+  # Return the list of plots
+  return(plot_list)
+}
+
+ all_plots <- generate_histograms_for_columns(dmepos, columns_to_plot, output_dir = "histogram_plots")
+```
+
+The distribution looks much better now, T
 
