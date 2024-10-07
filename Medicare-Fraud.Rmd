@@ -24,15 +24,15 @@ The Data was too big to upload directly to R, so it was uploaded to mysql Workbe
 ```{r}
 con <- dbConnect(RMySQL::MySQL(), 
 
-                 dbname = "", 
+                 dbname = "fraud", 
 
-                 host = "", 
+                 host = "localhost", 
 
-                 port = "", 
+                 port = 3306, 
 
-                 user = "", 
+                 user = "root", 
 
-                 password = "")
+                 password = "Kidace909")
 
 dbSendQuery(con, "SET GLOBAL local_infile = true;") # <--- Added this
 
@@ -133,6 +133,18 @@ dmepos <- dbGetQuery(con, "SELECT * FROM dmepos")
 combined_dataset <- dbGetQuery(con, "SELECT * FROM combined_dataset")
 ```
 
+Replace NA values in exclusion column with 0
+```{r}
+medicare_part_b$Exclusion <- ifelse(is.na(medicare_part_b$Exclusion), 0, medicare_part_b$Exclusion)
+
+medicare_part_d$Exclusion <- ifelse(is.na(medicare_part_d$Exclusion), 0, medicare_part_d$Exclusion)
+
+dmepos$Exclusion <- ifelse(is.na(dmepos$Exclusion), 0, dmepos$Exclusion)
+
+combined_dataset$Exclusion <- ifelse(is.na(combined_dataset$Exclusion), 0, combined_dataset$Exclusion)
+```
+
+
 Now lets call a function to calculate the percentage of fraudulent to non-fraudulent cases
 ```{r}
 calc_fraud_stats <- function(dataset){
@@ -168,4 +180,113 @@ fraud_table$Percent_Fraudulent <- round(fraud_table$Percent_Fraudulent, 3)
 kable(fraud_table, format = "markdown", digits = 3)
 ```
 
+So the DMEPOS has the highest percentage of Fraudulent data at 0.027% pf fraudulent data
+
+Implement one-hot-encoding for gender and provider type for Dmepos dataset
+```{r}
+
+dmepos <- dmepos %>%
+  mutate(
+    gender_male = case_when(
+      Referring_provider_gender == "M" ~ 1,
+      Referring_provider_gender == "F" ~ 0,
+      TRUE ~ 0  
+    ),
+    gender_female = case_when(
+      Referring_provider_gender == "F" ~ 1,
+      Referring_provider_gender == "M" ~ 0,
+      TRUE ~ 0  
+    )
+  )
+
+# One-hot encoding for provider type/specialty
+provider_types <- unique(dmepos$Referring_provider_type)
+
+# Create a one-hot encoded column for each provider type
+for (type in provider_types) {
+  col_name <- paste0("provider_type_", make.names(type))
+  dmepos[[col_name]] <- as.integer(dmepos$Referring_provider_type == type)
+}
+
+# Remove original categorical columns and NPI
+dmepos <- dmepos %>%
+  select(-Referring_provider_gender, -Referring_provider_type, -Referring_npi)
+
+```
+
+Implement one-hot-encoding for gender and provider type for Medicare_part_B
+```{r}
+
+medicare_part_b <- medicare_part_b %>%
+  mutate(
+    gender_male = case_when(
+      Nppes_provider_gender == "M" ~ 1,
+      Nppes_provider_gender == "F" ~ 0,
+      TRUE ~ 0  
+    ),
+    gender_female = case_when(
+      Nppes_provider_gender == "F" ~ 1,
+      Nppes_provider_gender == "M" ~ 0,
+      TRUE ~ 0  
+    )
+  )
+
+# One-hot encoding for provider type
+provider_types <- unique(medicare_part_b$Provider_type)
+for (type in provider_types) {
+  col_name <- paste0("provider_type_", make.names(type))
+  medicare_part_b[[col_name]] <- as.integer(medicare_part_b$Provider_type == type)
+}
+
+# Remove original categorical columns and NPI
+medicare_part_b <- medicare_part_b %>%
+  select(-Nppes_provider_gender, -Provider_type, -Npi)
+```
+
+
+Implement one-hot-encoding for gender and provider type for Medicare_part_D
+```{r}
+
+# One-hot encoding for specialty description
+specialty_descriptions <- unique(medicare_part_d$Specialty_description)
+for (desc in specialty_descriptions) {
+  col_name <- paste0("specialty_", make.names(desc))
+  medicare_part_d[[col_name]] <- as.integer(medicare_part_d$Specialty_description == desc)
+}
+
+# Remove original categorical column and NPI
+medicare_part_d <- medicare_part_d %>%
+  select(-Specialty_description, -Npi)
+```
+
+
+Implement one-hot-encoding for gender and provider type for Combined dataset
+```{r}
+
+# One-hot encoding for gender
+combined_dataset <- combined_dataset %>%
+  mutate(
+    gender_male = case_when(
+      Nppes_provider_gender == "M" ~ 1,
+      Nppes_provider_gender == "F" ~ 0,
+      TRUE ~ 0  
+    ),
+    gender_female = case_when(
+      Nppes_provider_gender == "F" ~ 1,
+      Nppes_provider_gender == "M" ~ 0,
+      TRUE ~ 0  
+    )
+  )
+
+# One-hot encoding for provider type
+provider_types <- unique(combined_dataset$Provider_type)
+for (type in provider_types) {
+  col_name <- paste0("provider_type_", make.names(type))
+  combined_dataset[[col_name]] <- as.integer(combined_dataset$Provider_type == type)
+}
+
+# Remove original categorical columns and NPI
+combined_dataset <- combined_dataset %>%
+  select(-Nppes_provider_gender, -Provider_type, -Npi)
+```
 
