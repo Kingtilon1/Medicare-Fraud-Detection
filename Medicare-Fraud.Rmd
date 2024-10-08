@@ -21,6 +21,7 @@ library(caret)
 library(pROC)
 library(ROSE)  
 library(ggplot2)
+library(DMwR2)
 options(rstudio.connectionObserver.errorsSuppressed = TRUE)
 ```
 
@@ -466,5 +467,16 @@ generate_histograms_for_columns <- function(data, columns, output_dir = NULL, lo
  all_plots <- generate_histograms_for_columns(dmepos, columns_to_plot, output_dir = "histogram_plots")
 ```
 
-The distribution looks much better now, T
+The distribution looks much better now, Time to split into test and training sets
+```{r}
+set.seed(123)  # for reproducibility
+training_indices <- createDataPartition(dmepos$Exclusion, p = 0.7, list = FALSE)
+train_data <- dmepos[training_indices, ]
+test_data <- dmepos[-training_indices, ]
+```
+
+```{r}
+table(train_data$Exclusion)
+```
+
 
