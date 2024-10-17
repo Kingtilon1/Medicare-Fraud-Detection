@@ -139,6 +139,24 @@ dmepos <- dbGetQuery(con, "SELECT * FROM dmepos")
 combined_dataset <- dbGetQuery(con, "SELECT * FROM combined_dataset")
 ```
 
+Download from local file
+```{r}
+# Import medicare_part_b
+medicare_part_b <- read.csv("C:\\Users\\bobbt\\Downloads\\OneDrive_1_10-16-2024\\medicare_part_b.csv")
+
+# Import medicare_part_d
+medicare_part_d <- read.csv("C:\\Users\\bobbt\\Downloads\\OneDrive_1_10-16-2024\\medicare_part_d.csv")
+
+# Import dmepos
+dmepos <- read.csv("C:\\Users\\bobbt\\Downloads\\OneDrive_1_10-16-2024\\dmepos.csv")
+
+# Import combined_dataset
+combined_dataset <- read.csv("C:\\Users\\bobbt\\Downloads\\OneDrive_1_10-16-2024\\combined_dataset.csv")
+```
+
+
+
+
 Replace NA values in exclusion column with 0
 ```{r}
 medicare_part_b$Exclusion <- ifelse(is.na(medicare_part_b$Exclusion), 0, medicare_part_b$Exclusion)
@@ -305,7 +323,6 @@ sum(is.na(dmepos))
 ```
 No NA values, lets see the distribution of the numerical columns to check for any outliers
 ```{r}
-library(ggplot2)
 
 # Function to plot histograms for selected columns
 plot_histograms <- function(df, columns) {
@@ -321,7 +338,7 @@ plot_histograms <- function(df, columns) {
   }
 }
 
-# Specify the columns you want to create histograms for, ommitting the beneficiary columns, it leads to highly skewed distributions
+
 columns_to_plot <- c(
   "avg_number_of_suppliers", 
   "sum_number_of_suppliers", 
@@ -368,7 +385,7 @@ find_outliers_iqr <- function(df, column) {
 
 ```
 
-Im going to go through every numerical column specifieied, and call trhe find_outliers_iqr function so that every row that contains the outlier is dropped
+Im going to go through every numerical column specifieied, and call the find_outliers_iqr function so that every row that contains the outlier is dropped
 ```{r}
 remove_outliers <- function(df, column) {
   outliers <- find_outliers_iqr(df, column)
@@ -389,41 +406,45 @@ for (column in columns_to_plot) {
 }
 ```
 
-puting back benficiary coluymns to see the distirbution as well
-```{r}
-columns_to_plot <- c(
-  "avg_number_of_suppliers", 
-  "sum_number_of_suppliers", 
-  "stddev_number_of_suppliers",
-  "min_number_of_suppliers", 
-  "max_number_of_suppliers",
-  "max_number_of_supplier_beneficiaries", 
-  "avg_number_of_supplier_beneficiaries",
-  "sum_number_of_supplier_beneficiaries", 
-  "stddev_number_of_supplier_beneficiaries",
-  "min_number_of_supplier_beneficiaries",
-  "avg_number_of_supplier_claims",
-  "sum_number_of_supplier_claims",
-  "stddev_number_of_supplier_claims",
-  "min_number_of_supplier_claims",
-  "max_number_of_supplier_claims",
-  "avg_number_of_supplier_services",
-  "sum_number_of_supplier_services",
-  "stddev_number_of_supplier_services",
-  "min_number_of_supplier_services",
-  "max_number_of_supplier_services",
-  "avg_supplier_submitted_charge",
-  "stddev_supplier_submitted_charge",
-  "min_supplier_submitted_charge",
-  "max_supplier_submitted_charge",
-  "avg_supplier_medicare_payment",
-  "stddev_supplier_medicare_payment",
-  "min_supplier_medicare_payment",
-  "max_supplier_medicare_payment"
-)
-```
+
 
 Distribution after removing outliers
+
+
+```{r}
+generate_improved_histogram <- function(data, column, log_scale = FALSE) {
+  # Convert column name to symbol for use in aes()
+  col_sym <- rlang::sym(column)
+  
+  # Create the base plot
+  p <- ggplot(data, aes(x = !!col_sym)) +
+    geom_histogram(bins = 30, fill = "blue", color = "black", alpha = 0.7) +
+    labs(title = paste("Distribution of", column),
+         x = column,
+         y = "Frequency") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  # Add a density curve
+  p <- p + geom_density(aes(y = ..count.. * 30), color = "red", size = 1)
+  
+  # Add mean and median lines
+  mean_val <- mean(data[[column]], na.rm = TRUE)
+  median_val <- median(data[[column]], na.rm = TRUE)
+  p <- p + 
+    geom_vline(aes(xintercept = mean_val), color = "green", linetype = "dashed", size = 1) +
+    geom_vline(aes(xintercept = median_val), color = "purple", linetype = "dashed", size = 1) +
+    annotate("text", x = mean_val, y = Inf, label = "Mean", vjust = 2, color = "green") +
+    annotate("text", x = median_val, y = Inf, label = "Median", vjust = 4, color = "purple")
+  
+  # Apply log scale if requested
+  if (log_scale) {
+    p <- p + scale_x_log10()
+  }
+  
+  return(p)
+}
+```
 
 
 ```{r}
@@ -479,4 +500,359 @@ test_data <- dmepos[-training_indices, ]
 table(train_data$Exclusion)
 ```
 
+```{r}
+dmepos_cleaned<-dmepos
+# Step 1: Prepare the data
+dmepos_cleaned <- dmepos_cleaned %>%
+  mutate(Exclusion = as.factor(Exclusion)) %>%
+  select_if(function(col) {
+    is.numeric(col) || 
+    (is.character(col) && all(col %in% c("0", "1"))) ||
+    (is.logical(col)) ||
+    all(col %in% c(0, 1)) ||
+    names(col) == "Exclusion"
+  })
+
+dmepos_cleaned <- na.omit(dmepos_cleaned)
+
+# Step 2: Split the data
+set.seed(123)
+training_indices <- createDataPartition(dmepos_cleaned$Exclusion, p = 0.7, list = FALSE)
+train_data <- dmepos_cleaned[training_indices, ]
+test_data <- dmepos_cleaned[-training_indices, ]
+
+# Print class distribution
+print("Class distribution in training data:")
+print(table(train_data$Exclusion))
+
+# Step 3: Handle class imbalance
+# Method 1: Up-sampling
+train_data_up <- upSample(x = train_data[, -which(names(train_data) == "Exclusion")],
+                          y = train_data$Exclusion,
+                          yname = "Exclusion")
+
+# Method 2: Down-sampling
+train_data_down <- downSample(x = train_data[, -which(names(train_data) == "Exclusion")],
+                              y = train_data$Exclusion,
+                              yname = "Exclusion")
+
+# Method 3: ROSE
+train_data_rose <- ROSE(Exclusion ~ ., data = train_data, seed = 123)$data
+
+# Print new class distributions
+print("Class distribution after up-sampling:")
+print(table(train_data_up$Exclusion))
+print("Class distribution after down-sampling:")
+print(table(train_data_down$Exclusion))
+print("Class distribution after ROSE:")
+print(table(train_data_rose$Exclusion))
+
+# Step 4: Build models
+model_original <- glm(Exclusion ~ ., data = train_data, family = binomial)
+model_up <- glm(Exclusion ~ ., data = train_data_up, family = binomial)
+model_down <- glm(Exclusion ~ ., data = train_data_down, family = binomial)
+model_rose <- glm(Exclusion ~ ., data = train_data_rose, family = binomial)
+
+# Step 5: Evaluate models
+evaluate_model <- function(model, test_data, model_name) {
+  predictions <- predict(model, newdata = test_data, type = "response")
+  predicted_classes <- ifelse(predictions > 0.5, 1, 0)
+  conf_matrix <- confusionMatrix(factor(predicted_classes), test_data$Exclusion)
+  roc_obj <- roc(test_data$Exclusion, predictions)
+  auc_value <- auc(roc_obj)
+  
+  cat("\n", model_name, "Results:\n")
+  print(conf_matrix)
+  cat("AUC:", auc_value, "\n")
+  
+  # Print top 10 most significant variables
+  coef_summary <- summary(model)$coefficients
+  significant_vars <- coef_summary[order(coef_summary[, "Pr(>|z|)"]), ]
+  print(head(significant_vars, 10))
+  
+  # Plot ROC curve
+  plot(roc_obj, main = paste("ROC Curve -", model_name))
+}
+
+evaluate_model(model_original, test_data, "Original Model")
+evaluate_model(model_up, test_data, "Up-sampled Model")
+evaluate_model(model_down, test_data, "Down-sampled Model")
+evaluate_model(model_rose, test_data, "ROSE Model")
+
+# Step 6: Feature importance (using up-sampled model as an example)
+importance <- varImp(model_up, scale = FALSE)
+print("Feature Importance:")
+print(importance)
+
+# Step 7: Odds ratios (using up-sampled model as an example)
+odds_ratios <- exp(coef(model_up))
+print("Odds Ratios:")
+print(odds_ratios)
+```
+
+
+We've tested this process out for the dmepos dataset, now lets do it for the rest
+
+### Medicare Part D
+```{r}
+# Define columns for outlier detection (excluding 'Exclusion')
+columns_to_process <- c(
+  "avg_total_claim_count", "sum_total_claim_count", "stddev_total_claim_count",
+  "min_total_claim_count", "max_total_claim_count", "avg_30_day_fill_count",
+  "sum_30_day_fill_count", "stddev_30_day_fill_count", "min_30_day_fill_count",
+  "max_30_day_fill_count", "avg_day_supply", "sum_day_supply", "stddev_day_supply",
+  "min_day_supply", "max_day_supply", "avg_drug_cost", "sum_drug_cost",
+  "stddev_drug_cost", "min_drug_cost", "max_drug_cost", "avg_bene_count",
+  "sum_bene_count", "stddev_bene_count", "min_bene_count", "max_bene_count"
+)
+
+# Apply outlier removal to medicare_part_d
+for (column in columns_to_process) {
+  tryCatch({
+    print(paste("Processing column:", column))
+    medicare_part_d <- remove_outliers(medicare_part_d, column)
+    print(paste("Rows remaining after processing", column, ":", nrow(medicare_part_d)))
+  }, error = function(e) {
+    print(paste("Error processing column:", column))
+    print(e)
+  })
+}
+
+# Generate histograms for the processed data
+all_plots_d <- generate_histograms_for_columns(medicare_part_d, columns_to_process, output_dir = "histogram_plots_part_d")
+
+# Prepare data for modeling
+medicare_part_d_cleaned <- medicare_part_d %>%
+  mutate(Exclusion = as.factor(Exclusion)) %>%
+  select_if(function(col) {
+    is.numeric(col) || 
+    (is.character(col) && all(col %in% c("0", "1"))) ||
+    (is.logical(col)) ||
+    all(col %in% c(0, 1)) ||
+    names(col) == "Exclusion"
+  })
+
+# Remove any remaining NA values
+medicare_part_d_cleaned <- na.omit(medicare_part_d_cleaned)
+
+# Check the structure of the cleaned dataset
+str(medicare_part_d_cleaned)
+
+# Print class distribution
+print("Class distribution in medicare_part_d_cleaned:")
+print(table(medicare_part_d_cleaned$Exclusion))
+
+# Split the data
+set.seed(123)
+training_indices_d <- createDataPartition(medicare_part_d_cleaned$Exclusion, p = 0.7, list = FALSE)
+train_data_d <- medicare_part_d_cleaned[training_indices_d, ]
+test_data_d <- medicare_part_d_cleaned[-training_indices_d, ]
+
+# Handle class imbalance
+train_data_up_d <- upSample(x = train_data_d[, -which(names(train_data_d) == "Exclusion")],
+                            y = train_data_d$Exclusion,
+                            yname = "Exclusion")
+
+train_data_down_d <- downSample(x = train_data_d[, -which(names(train_data_d) == "Exclusion")],
+                                y = train_data_d$Exclusion,
+                                yname = "Exclusion")
+
+train_data_rose_d <- ROSE(Exclusion ~ ., data = train_data_d, seed = 123)$data
+
+# Print new class distributions
+print("Class distribution after up-sampling (Part D):")
+print(table(train_data_up_d$Exclusion))
+print("Class distribution after down-sampling (Part D):")
+print(table(train_data_down_d$Exclusion))
+print("Class distribution after ROSE (Part D):")
+print(table(train_data_rose_d$Exclusion))
+
+# Build models
+model_original_d <- glm(Exclusion ~ ., data = train_data_d, family = binomial)
+model_up_d <- glm(Exclusion ~ ., data = train_data_up_d, family = binomial)
+model_down_d <- glm(Exclusion ~ ., data = train_data_down_d, family = binomial)
+model_rose_d <- glm(Exclusion ~ ., data = train_data_rose_d, family = binomial)
+
+# Evaluate models
+evaluate_model(model_original_d, test_data_d, "Original Model (Part D)")
+evaluate_model(model_up_d, test_data_d, "Up-sampled Model (Part D)")
+evaluate_model(model_down_d, test_data_d, "Down-sampled Model (Part D)")
+evaluate_model(model_rose_d, test_data_d, "ROSE Model (Part D)")
+
+# Feature importance (using up-sampled model as an example)
+importance_d <- varImp(model_up_d, scale = FALSE)
+print("Feature Importance (Part D):")
+print(importance_d)
+
+# Odds ratios (using up-sampled model as an example)
+odds_ratios_d <- exp(coef(model_up_d))
+print("Odds Ratios (Part D):")
+print(odds_ratios_d)
+```
+## Now for the Medicare Part B dataset
+
+```{r}
+# Define columns for outlier detection (excluding 'Exclusion')
+columns_to_process <- c(
+  "avg_bene_unique_cnt", "sum_bene_unique_cnt", "stddev_bene_unique_cnt",
+  "min_bene_unique_cnt", "max_bene_unique_cnt", "avg_line_srvc_cnt",
+  "sum_line_srvc_cnt", "stddev_line_srvc_cnt", "min_line_srvc_cnt",
+  "max_line_srvc_cnt", "avg_bene_day_srvc_cnt", "sum_bene_day_srvc_cnt",
+  "stddev_bene_day_srvc_cnt", "min_bene_day_srvc_cnt", "max_bene_day_srvc_cnt",
+  "avg_submitted_chrg_amt", "stddev_submitted_chrg_amt", "min_submitted_chrg_amt",
+  "max_submitted_chrg_amt", "avg_medicare_payment_amt", "stddev_medicare_payment_amt",
+  "min_medicare_payment_amt", "max_medicare_payment_amt"
+)
+
+# Apply outlier removal to medicare_part_b
+for (column in columns_to_process) {
+  tryCatch({
+    print(paste("Processing column:", column))
+    medicare_part_b <- remove_outliers(medicare_part_b, column)
+    print(paste("Rows remaining after processing", column, ":", nrow(medicare_part_b)))
+  }, error = function(e) {
+    print(paste("Error processing column:", column))
+    print(e)
+  })
+}
+
+# Generate histograms for the processed data
+all_plots_b <- generate_histograms_for_columns(medicare_part_b, columns_to_process, output_dir = "histogram_plots_part_b")
+
+# Prepare data for modeling
+medicare_part_b_cleaned <- medicare_part_b %>%
+  mutate(Exclusion = as.factor(Exclusion)) %>%
+  select_if(function(col) {
+    is.numeric(col) || 
+    (is.character(col) && all(col %in% c("0", "1"))) ||
+    (is.logical(col)) ||
+    all(col %in% c(0, 1)) ||
+    names(col) == "Exclusion"
+  })
+
+# Remove any remaining NA values
+medicare_part_b_cleaned <- na.omit(medicare_part_b_cleaned)
+
+# Check the structure of the cleaned dataset
+str(medicare_part_b_cleaned)
+
+# Print class distribution
+print("Class distribution in medicare_part_b_cleaned:")
+print(table(medicare_part_b_cleaned$Exclusion))
+
+# Split the data
+set.seed(123)
+training_indices_b <- createDataPartition(medicare_part_b_cleaned$Exclusion, p = 0.7, list = FALSE)
+train_data_b <- medicare_part_b_cleaned[training_indices_b, ]
+test_data_b <- medicare_part_b_cleaned[-training_indices_b, ]
+
+# Handle class imbalance
+train_data_up_b <- upSample(x = train_data_b[, -which(names(train_data_b) == "Exclusion")],
+                            y = train_data_b$Exclusion,
+                            yname = "Exclusion")
+
+train_data_down_b <- downSample(x = train_data_b[, -which(names(train_data_b) == "Exclusion")],
+                                y = train_data_b$Exclusion,
+                                yname = "Exclusion")
+
+train_data_rose_b <- ROSE(Exclusion ~ ., data = train_data_b, seed = 123)$data
+
+# Print new class distributions
+print("Class distribution after up-sampling (Part B):")
+print(table(train_data_up_b$Exclusion))
+print("Class distribution after down-sampling (Part B):")
+print(table(train_data_down_b$Exclusion))
+print("Class distribution after ROSE (Part B):")
+print(table(train_data_rose_b$Exclusion))
+
+# Build models
+model_original_b <- glm(Exclusion ~ ., data = train_data_b, family = binomial)
+model_up_b <- glm(Exclusion ~ ., data = train_data_up_b, family = binomial)
+model_down_b <- glm(Exclusion ~ ., data = train_data_down_b, family = binomial)
+model_rose_b <- glm(Exclusion ~ ., data = train_data_rose_b, family = binomial)
+
+# Evaluate models
+evaluate_model(model_original_b, test_data_b, "Original Model (Part B)")
+evaluate_model(model_up_b, test_data_b, "Up-sampled Model (Part B)")
+evaluate_model(model_down_b, test_data_b, "Down-sampled Model (Part B)")
+evaluate_model(model_rose_b, test_data_b, "ROSE Model (Part B)")
+
+# Feature importance (using up-sampled model as an example)
+importance_b <- varImp(model_up_b, scale = FALSE)
+print("Feature Importance (Part B):")
+print(importance_b)
+
+# Odds ratios (using up-sampled model as an example)
+odds_ratios_b <- exp(coef(model_up_b))
+print("Odds Ratios (Part B):")
+print(odds_ratios_b)
+```
+
+### And Finally for the Combined Dataset, there are very few fraud labeled data within the combined dataset, so we wont be removing outliers
+
+```{r}
+# Data cleaning (without removing fraudulent rows)
+combined_dataset_cleaned <- combined_dataset %>%
+  mutate(Exclusion = as.factor(Exclusion)) %>%
+  select_if(function(col) {
+    is.numeric(col) || 
+    (is.character(col) && all(col %in% c("0", "1"))) ||
+    (is.logical(col)) ||
+    all(col %in% c(0, 1)) ||
+    names(col) == "Exclusion"
+  })
+
+combined_dataset_cleaned <- na.omit(combined_dataset_cleaned)
+
+# Print class distribution
+print("Class distribution in combined_dataset_cleaned:")
+print(table(combined_dataset_cleaned$Exclusion))
+
+# Split the data
+set.seed(123)
+training_indices_combined <- createDataPartition(combined_dataset_cleaned$Exclusion, p = 0.7, list = FALSE)
+train_data_combined <- combined_dataset_cleaned[training_indices_combined, ]
+test_data_combined <- combined_dataset_cleaned[-training_indices_combined, ]
+
+# Handle class imbalance
+train_data_up_combined <- upSample(x = train_data_combined[, -which(names(train_data_combined) == "Exclusion")],
+                                   y = train_data_combined$Exclusion,
+                                   yname = "Exclusion")
+
+train_data_down_combined <- downSample(x = train_data_combined[, -which(names(train_data_combined) == "Exclusion")],
+                                       y = train_data_combined$Exclusion,
+                                       yname = "Exclusion")
+
+train_data_rose_combined <- ROSE(Exclusion ~ ., data = train_data_combined, seed = 123)$data
+
+# Print new class distributions
+print("Class distribution after up-sampling (Combined):")
+print(table(train_data_up_combined$Exclusion))
+print("Class distribution after down-sampling (Combined):")
+print(table(train_data_down_combined$Exclusion))
+print("Class distribution after ROSE (Combined):")
+print(table(train_data_rose_combined$Exclusion))
+
+# Build models
+model_original_combined <- glm(Exclusion ~ ., data = train_data_combined, family = binomial)
+model_up_combined <- glm(Exclusion ~ ., data = train_data_up_combined, family = binomial)
+model_down_combined <- glm(Exclusion ~ ., data = train_data_down_combined, family = binomial)
+model_rose_combined <- glm(Exclusion ~ ., data = train_data_rose_combined, family = binomial)
+
+# Evaluate models
+evaluate_model(model_original_combined, test_data_combined, "Original Model (Combined)")
+evaluate_model(model_up_combined, test_data_combined, "Up-sampled Model (Combined)")
+evaluate_model(model_down_combined, test_data_combined, "Down-sampled Model (Combined)")
+evaluate_model(model_rose_combined, test_data_combined, "ROSE Model (Combined)")
+
+# Feature importance (using up-sampled model as an example)
+importance_combined <- varImp(model_up_combined, scale = FALSE)
+print("Feature Importance (Combined):")
+print(importance_combined)
+
+# Odds ratios (using up-sampled model as an example)
+odds_ratios_combined <- exp(coef(model_up_combined))
+print("Odds Ratios (Combined):")
+print(odds_ratios_combined)
+```
 
