@@ -139,19 +139,22 @@ dmepos <- dbGetQuery(con, "SELECT * FROM dmepos")
 combined_dataset <- dbGetQuery(con, "SELECT * FROM combined_dataset")
 ```
 
+
+### Load from Local File
+
 Download from local file
 ```{r}
 # Import medicare_part_b
-medicare_part_b <- read.csv("C:\\Users\\bobbt\\Downloads\\OneDrive_1_10-16-2024\\medicare_part_b.csv")
+medicare_part_b <- read.csv("medicare_part_b.csv")
 
 # Import medicare_part_d
-medicare_part_d <- read.csv("C:\\Users\\bobbt\\Downloads\\OneDrive_1_10-16-2024\\medicare_part_d.csv")
+medicare_part_d <- read.csv("medicare_part_d.csv")
 
 # Import dmepos
-dmepos <- read.csv("C:\\Users\\bobbt\\Downloads\\OneDrive_1_10-16-2024\\dmepos.csv")
+dmepos <- read.csv("dmepos.csv")
 
 # Import combined_dataset
-combined_dataset <- read.csv("C:\\Users\\bobbt\\Downloads\\OneDrive_1_10-16-2024\\combined_dataset.csv")
+combined_dataset <- read.csv("combined_dataset.csv")
 ```
 
 
@@ -854,5 +857,63 @@ print(importance_combined)
 odds_ratios_combined <- exp(coef(model_up_combined))
 print("Odds Ratios (Combined):")
 print(odds_ratios_combined)
+```
+
+
+
+
+
+
+
+
+
+
+## NEW Models
+
+### PART D
+
+#### RF
+
+```{r}
+
+library(randomForest)
+
+set.seed(698)
+
+
+train_data_rose_d
+test_data_d
+
+#Scaling to produce better results
+
+preprocess_partd=preProcess(train_data_rose_d, method=c("center","scale"))
+
+train_data_d_scaled = predict(preprocess_partd, train_data_rose_d)
+
+test_data_d_scaled=predict(preprocess_partd,test_data_d)
+
+
+# 5 Fold Validation and tuning grid to find best mtry value
+
+tune_grid <- expand.grid(mtry = c(2, 3, 4, 5))
+control <- trainControl(method = "cv", number = 5) 
+
+rf_model_d<- train(
+  Exclusion ~ ., 
+  data = train_data_d_scaled, 
+  method = "rf", 
+  trControl = control, 
+  tuneGrid = tune_grid, 
+  ntree = 100
+)
+
+print(rf_model_d$bestTune)
+var_importance_d <- varImp(rf_model_d, scale = FALSE)
+print(var_importance_d)
+
+predicted_exclusions_scaled <- predict(rf_model_d, newdata = test_data_d_scaled)
+
+print(rf_model_d)
+
 ```
 
