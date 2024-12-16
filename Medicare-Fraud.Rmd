@@ -1,9 +1,7 @@
----
 title: "Medicare Fraud"
 output: html_document
 date: "2024-09-17"
 ---
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
@@ -11,148 +9,853 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r}
 library(httr)
 library(jsonlite)
-
-library(tidycensus)
+library(sparklyr)
 library(dplyr)
 library(purrr)
+library(DBI)
+library(knitr)
+library(RMySQL)
+library(data.table)
+library(caret)
+library(pROC)
+library(ROSE)  
+library(ggplot2)
+library(DMwR2)
+options(rstudio.connectionObserver.errorsSuppressed = TRUE)
+```
+
+The Data was too big to upload directly to R, so it was uploaded to mysql Workbench instead for aggregation before being pulled back into R
+
+```{r}
+con <- dbConnect(RMySQL::MySQL(), 
+
+                 dbname = "fraud", 
+
+                 host = "localhost", 
+
+                 port = 3306, 
+
+                 user = "root", 
+
+                 password = "Kidace909")
+
+dbSendQuery(con, "SET GLOBAL local_infile = true;") # <--- Added this
 
 ```
 
 
 
 
-### Testing out API
 ```{r}
+# Open the file connection
+cons <- file("C:\\Users\\bobbt\\Downloads\\Medicare_Part_D_Prescribers_by_Provider_and_Drug_2022.csv", open = "r")
 
+# Count total lines in the file (each line corresponds to a row)
+total_rows <- 0
+while (length(line <- readLines(cons, n = 1, warn = FALSE)) > 0) {
+  total_rows <- total_rows + 1
+}
+close(cons)
 
-res = GET("https://data.cms.gov/data-api/v1/dataset/92396110-2aed-4d63-a6a2-5d6207d46a29/data?size=5000")
-res1 = GET("https://data.cms.gov/data-api/v1/dataset/9552739e-3d05-4c1b-8eff-ecabf391e2e5/data?size=5000&offset=12000" )
-res2 = GET("https://data.cms.gov/data-api/v1/dataset/c8ea3f8e-3a09-4fea-86f2-8902fb4b0920/data?size=5000")
-res3 = GET("https://data.cms.gov/data-api/v1/dataset/1746a83e-bb65-4300-8e02-21edbab77c6b/data?size=5000")
-```
-
-
-
-### Retreive CMS Data
-
-```{r}
-Medicare=fromJSON(rawToChar(res$content))
-Medicare_Part_D_Pro=fromJSON(rawToChar(res1$content))
-Medicare_Part_D_Geo=fromJSON(rawToChar(res2$content))
-DMEPOSS=fromJSON(rawToChar(res3$content))
-```
-
-### Retreive LIEI data
-
-```{r}
-Liei <- read.csv("https://raw.githubusercontent.com/Kingtilon1/Medicare-Fraud-Detection/refs/heads/main/LIEI_UPDATED_Sept_2024.csv")
-```
-
-
-
-
-
-```{r}
-Medicare_Part_B <- Medicare %>%
-  select(
-    Npi = Rndrng_NPI,
-    Provider_type = Rndrng_Prvdr_Type,
-    Nppes_provider_gender = Rndrng_Prvdr_Gndr,
-    Line_srvc_cnt = Tot_Srvcs,
-    Bene_unique_cnt = Tot_Benes,
-    Bene_day_srvc_cnt = Tot_Bene_Day_Srvcs,
-    Average_submitted_chrg_amt = Avg_Sbmtd_Chrg,
-    Average_medicare_payment_amt = Avg_Mdcr_Pymt_Amt
-  )
+# Print total number of rows (including the header)
+total_rows
 ```
 
 
 ```{r}
-Medicare_Part_D <- Medicare_Part_D_Pro %>%
-  select(
-    Npi = Prscrbr_NPI,
-    Specialty_description = Prscrbr_Type,
-    Bene_count = Tot_Benes,
-    Total_claim_count = Tot_Clms,
-    Total_30_day_fill_count = Tot_30day_Fills,
-    Total_day_supply = Tot_Day_Suply,
-    Total_drug_cost = Tot_Drug_Cst
-  )
+# Define the split point (half of the file)
+split_point <- total_rows / 2
 
-```
+# Open connections for reading and writing
+input_file <- file("C:\\Users\\bobbt\\Downloads\\Medicare_Part_D_Prescribers_by_Provider_and_Drug_2022.csv", open = "r")
+output_file <- file("C:\\Users\\bobbt\\Downloads\\Medicare_Part_D_Second_Half.csv", open = "w")
 
+# Read and write the header to the second half file
+header <- readLines(input_file, n = 1)
+writeLines(header, output_file)
 
-```{r}
-DMEPOS <- DMEPOSS %>%
-  select(
-    Referring_npi = Suplr_NPI,  
-    Referring_provider_type = Suplr_Prvdr_Spclty_Desc, 
-    Referring_provider_gender = Suplr_Prvdr_Gndr,  
-    Number_of_suppliers = Tot_Suplr_Srvcs,  
-    Number_of_supplier_beneficiaries = Tot_Suplr_Benes,  
-    Number_of_supplier_claims = Tot_Suplr_Clms,
-    Number_of_supplier_services = Tot_Suplr_Srvcs, 
-    Avg_supplier_submitted_charge = Avg_Suplr_Sbmtd_Chrg,  
-    Avg_supplier_medicare_pmt_amt = Avg_Suplr_Mdcr_Pymt_Amt
-  )
-```
-
-```{r}
-Medicare_Part_D$Npi <- as.integer(trimws(Medicare_Part_D$Npi))
-Medicare_Part_B$Npi <- as.integer(trimws(Medicare_Part_B$Npi))
-DMEPOS$Referring_npi <- as.integer(trimws(DMEPOS$Referring_npi))
-```
-
-
-### Join the LEIE data to each data set based on the matching npi code
-```{r}
-Medicare_Part_D$Exclusion <- ifelse(Medicare_Part_D$Npi %in% Liei$NPI, 1, 0)
-Medicare_Part_B$Exclusion <- ifelse(Medicare_Part_B$Npi %in% Liei$NPI, 1, 0)
-DMEPOS$Exclusion <- ifelse(DMEPOS$Referring_npi %in% Liei$NPI, 1, 0)
-```
-
-
-
-```{r}
-base_url <- "https://data.cms.gov/data-api/v1/dataset/9552739e-3d05-4c1b-8eff-ecabf391e2e5/data"
-
-retrieve_data <- function(size, offset) {
-  url <- paste0(base_url, "?size=", size, "&offset=", offset)
-  res <- GET(url)
-  Medicare <- fromJSON(rawToChar(res$content))
-  return(Medicare)  # Adjust based on the actual structure of the response
+# Skip the first half of the rows
+for (i in 2:split_point) {
+  readLines(input_file, n = 1)  # Skip rows without saving them
 }
 
-# Loop through to get all data
-all_data <- data.frame()
-offset <- 0
-size <- 5000
+# Write the second half of the rows to the new file
+for (i in (split_point + 1):total_rows) {
+  line <- readLines(input_file, n = 1)
+  writeLines(line, output_file)
+}
 
-repeat {
-  new_data <- retrieve_data(size, offset)
+# Close connections
+close(input_file)
+close(output_file)
+
+```
+
+
+read medicare_part_d and leie dataset and uploiad it to 
+```{r}
+# Define the file path
+file_path <- "C:\\Users\\bobbt\\Downloads\\medicare_part_2.csv"
+leie_path <- "C:\\Users\\bobbt\\Downloads\\leie.csv"
+
+# Read the CSV file
+data <- fread(file_path)
+datas <- fread(leie_path)
+
+# Check the number of rows
+num_rows <- nrow(data)
+print(num_rows)
+
+dbWriteTable(con, "medicare_part_2_data", as.data.frame(data), overwrite = TRUE, row.names = FALSE)
+dbDisconnect(con)
+```
+
+
+
+```{r}
+dbWriteTable(con, "medicare_part_2_data", as.data.frame(data), overwrite = TRUE, row.names = FALSE)
+dbDisconnect(con)
+dbWriteTable(con, "leie", as.data.frame(datas), overwrite = TRUE, row.names = FALSE)
+```
+
+
+```{r}
+dbWriteTable(con, "leie", as.data.frame(datas), overwrite = TRUE, row.names = FALSE)
+
+```
+Import the data into data frames
+```{r}
+# Import medicare_part_b
+medicare_part_b <- dbGetQuery(con, "SELECT * FROM medicare_part_b")
+
+# Import medicare_part_d
+medicare_part_d <- dbGetQuery(con, "SELECT * FROM medicare_part_d")
+
+# Import dmepos
+dmepos <- dbGetQuery(con, "SELECT * FROM dmepos")
+
+# Import combined_dataset
+combined_dataset <- dbGetQuery(con, "SELECT * FROM combined_dataset")
+```
+
+
+### Load from Local File
+
+Download from local file
+```{r}
+# Import medicare_part_b
+medicare_part_b <- read.csv("medicare_part_b.csv")
+
+# Import medicare_part_d
+medicare_part_d <- read.csv("medicare_part_d.csv")
+
+# Import dmepos
+dmepos <- read.csv("dmepos.csv")
+
+# Import combined_dataset
+combined_dataset <- read.csv("combined_dataset.csv")
+```
+
+
+
+
+Replace NA values in exclusion column with 0
+```{r}
+medicare_part_b$Exclusion <- ifelse(is.na(medicare_part_b$Exclusion), 0, medicare_part_b$Exclusion)
+
+medicare_part_d$Exclusion <- ifelse(is.na(medicare_part_d$Exclusion), 0, medicare_part_d$Exclusion)
+
+dmepos$Exclusion <- ifelse(is.na(dmepos$Exclusion), 0, dmepos$Exclusion)
+
+combined_dataset$Exclusion <- ifelse(is.na(combined_dataset$Exclusion), 0, combined_dataset$Exclusion)
+```
+
+
+Now lets call a function to calculate the percentage of fraudulent to non-fraudulent cases
+```{r}
+calc_fraud_stats <- function(dataset){
+  total <- nrow(dataset)
+  fraud <- sum(dataset$Exclusion == 1, na.rm = TRUE)
+  non_fraud = total - fraud
+  percent_fraud = (fraud/total) * 100
+  return(c(Non_fraudulent = non_fraud,
+           Fraudulent = fraud,
+           Percent_Fraudulent= percent_fraud))
+}
+
+part_b_stats <- calc_fraud_stats(medicare_part_b)
+part_d_stats <- calc_fraud_stats(medicare_part_d)
+dmepos_stats <- calc_fraud_stats(dmepos)
+combined_stats <- calc_fraud_stats(combined_dataset)
+
+fraud_table <- data.frame(Dataset = c("Part B", "Part D", "DMEPOS", "Combined"),
+  Non_fraudulent = c(part_b_stats["Non_fraudulent"], 
+                     part_d_stats["Non_fraudulent"], 
+                     dmepos_stats["Non_fraudulent"], 
+                     combined_stats["Non_fraudulent"]),
+  Fraudulent = c(part_b_stats["Fraudulent"], 
+                 part_d_stats["Fraudulent"], 
+                 dmepos_stats["Fraudulent"], 
+                 combined_stats["Fraudulent"]),
+  Percent_Fraudulent = c(part_b_stats["Percent_Fraudulent"], 
+                         part_d_stats["Percent_Fraudulent"], 
+                         dmepos_stats["Percent_Fraudulent"], 
+                         combined_stats["Percent_Fraudulent"]))
+
+fraud_table$Percent_Fraudulent <- round(fraud_table$Percent_Fraudulent, 3)
+kable(fraud_table, format = "markdown", digits = 3)
+```
+
+So the DMEPOS has the highest percentage of Fraudulent data at 0.027% pf fraudulent data
+
+Implement one-hot-encoding for gender and provider type for Dmepos dataset
+```{r}
+
+dmepos <- dmepos %>%
+  mutate(
+    gender_male = case_when(
+      Referring_provider_gender == "M" ~ 1,
+      Referring_provider_gender == "F" ~ 0,
+      TRUE ~ 0  
+    ),
+    gender_female = case_when(
+      Referring_provider_gender == "F" ~ 1,
+      Referring_provider_gender == "M" ~ 0,
+      TRUE ~ 0  
+    )
+  )
+
+# One-hot encoding for provider type/specialty
+provider_types <- unique(dmepos$Referring_provider_type)
+
+# Create a one-hot encoded column for each provider type
+for (type in provider_types) {
+  col_name <- paste0("provider_type_", make.names(type))
+  dmepos[[col_name]] <- as.integer(dmepos$Referring_provider_type == type)
+}
+
+# Remove original categorical columns and NPI
+dmepos <- dmepos %>%
+  select(-Referring_provider_gender, -Referring_provider_type, -Referring_npi)
+
+```
+
+Implement one-hot-encoding for gender and provider type for Medicare_part_B
+```{r}
+
+medicare_part_b <- medicare_part_b %>%
+  mutate(
+    gender_male = case_when(
+      Nppes_provider_gender == "M" ~ 1,
+      Nppes_provider_gender == "F" ~ 0,
+      TRUE ~ 0  
+    ),
+    gender_female = case_when(
+      Nppes_provider_gender == "F" ~ 1,
+      Nppes_provider_gender == "M" ~ 0,
+      TRUE ~ 0  
+    )
+  )
+
+# One-hot encoding for provider type
+provider_types <- unique(medicare_part_b$Provider_type)
+for (type in provider_types) {
+  col_name <- paste0("provider_type_", make.names(type))
+  medicare_part_b[[col_name]] <- as.integer(medicare_part_b$Provider_type == type)
+}
+
+# Remove original categorical columns and NPI
+medicare_part_b <- medicare_part_b %>%
+  select(-Nppes_provider_gender, -Provider_type, -Npi)
+```
+
+
+Implement one-hot-encoding for gender and provider type for Medicare_part_D
+```{r}
+
+# One-hot encoding for specialty description
+specialty_descriptions <- unique(medicare_part_d$Specialty_description)
+for (desc in specialty_descriptions) {
+  col_name <- paste0("specialty_", make.names(desc))
+  medicare_part_d[[col_name]] <- as.integer(medicare_part_d$Specialty_description == desc)
+}
+
+# Remove original categorical column and NPI
+medicare_part_d <- medicare_part_d %>%
+  select(-Specialty_description, -Npi)
+```
+
+
+Implement one-hot-encoding for gender and provider type for Combined dataset
+```{r}
+
+# One-hot encoding for gender
+combined_dataset <- combined_dataset %>%
+  mutate(
+    gender_male = case_when(
+      Nppes_provider_gender == "M" ~ 1,
+      Nppes_provider_gender == "F" ~ 0,
+      TRUE ~ 0  
+    ),
+    gender_female = case_when(
+      Nppes_provider_gender == "F" ~ 1,
+      Nppes_provider_gender == "M" ~ 0,
+      TRUE ~ 0  
+    )
+  )
+
+# One-hot encoding for provider type
+provider_types <- unique(combined_dataset$Provider_type)
+for (type in provider_types) {
+  col_name <- paste0("provider_type_", make.names(type))
+  combined_dataset[[col_name]] <- as.integer(combined_dataset$Provider_type == type)
+}
+
+# Remove original categorical columns and NPI
+combined_dataset <- combined_dataset %>%
+  select(-Nppes_provider_gender, -Provider_type, -Npi)
+```
+
+### Binomial Logistic regression
+
+#### DMEPOS
+check for na values
+```{r}
+sum(is.na(dmepos))
+```
+No NA values, lets see the distribution of the numerical columns to check for any outliers
+```{r}
+
+# Function to plot histograms for selected columns
+plot_histograms <- function(df, columns) {
+  for (col in columns) {
+    # Create a ggplot object
+    p <- ggplot(df, aes_string(x = col)) +
+      geom_histogram(binwidth = 30, fill = "blue", color = "black", alpha = 0.7) +
+      labs(title = paste("Histogram of", col), x = col, y = "Frequency") +
+      theme_minimal()
+    
+    # Print the plot
+    print(p)
+  }
+}
+
+
+columns_to_plot <- c(
+  "avg_number_of_suppliers", 
+  "sum_number_of_suppliers", 
+  "stddev_number_of_suppliers",
+  "min_number_of_suppliers", 
+  "max_number_of_suppliers",
+  "avg_number_of_supplier_claims",
+  "sum_number_of_supplier_claims",
+  "stddev_number_of_supplier_claims",
+  "min_number_of_supplier_claims",
+  "max_number_of_supplier_claims",
+  "avg_number_of_supplier_services",
+  "sum_number_of_supplier_services",
+  "stddev_number_of_supplier_services",
+  "min_number_of_supplier_services",
+  "max_number_of_supplier_services",
+  "avg_supplier_submitted_charge",
+  "stddev_supplier_submitted_charge",
+  "min_supplier_submitted_charge",
+  "max_supplier_submitted_charge",
+  "avg_supplier_medicare_payment",
+  "stddev_supplier_medicare_payment",
+  "min_supplier_medicare_payment",
+  "max_supplier_medicare_payment"
+)
+
+plot_histograms(dmepos, columns_to_plot)
+
+```
+
+
+There are some outliers, a rule of thumb is to look out for values that are 1.5 times the iqr above the 75th ir te 25th percentile
+```{r}
+find_outliers_iqr <- function(df, column) {
+  Q1 <- quantile(df[[column]], 0.25, na.rm = TRUE)
+  Q3 <- quantile(df[[column]], 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
   
-  # Print statement to track progress
-  cat("Fetching data with offset:", offset, "Number of rows retrieved:", nrow(new_data), "\n")
-  
-  if (nrow(new_data) == 0) break  # Exit if no more data
-  
-  all_data <- rbind(all_data, new_data)
-  offset <- offset + size  # Increment the offset for the next request
+  outliers <- df[[column]][df[[column]] < lower_bound | df[[column]] > upper_bound]
+  return(outliers)
+}
+
+```
+
+Im going to go through every numerical column specifieied, and call the find_outliers_iqr function so that every row that contains the outlier is dropped
+```{r}
+remove_outliers <- function(df, column) {
+  outliers <- find_outliers_iqr(df, column)
+  df <- df[!(df[[column]] %in% outliers), ]
+  return(df)
+}
+
+# Main loop to process all columns
+for (column in columns_to_plot) {
+  tryCatch({
+    print(paste("Processing column:", column))
+    dmepos <- remove_outliers(dmepos, column)
+    print(paste("Rows remaining after processing", column, ":", nrow(dmepos)))
+  }, error = function(e) {
+    print(paste("Error processing column:", column))
+    print(e)
+  })
 }
 ```
 
+
+
+Distribution after removing outliers
+
+
 ```{r}
-npi_vector <- unique(all_data$Suplr_NPI)  # Adjust column name as necessary
-# Function to check for matching NPIs
-check_matches <- function(target_data, npi_vector) {
-  target_data$match <- ifelse(target_data$NPI %in% npi_vector, 1, 0)  # Adjust column name
-  return(target_data)
+generate_improved_histogram <- function(data, column, log_scale = FALSE) {
+  # Convert column name to symbol for use in aes()
+  col_sym <- rlang::sym(column)
+  
+  # Create the base plot
+  p <- ggplot(data, aes(x = !!col_sym)) +
+    geom_histogram(bins = 30, fill = "blue", color = "black", alpha = 0.7) +
+    labs(title = paste("Distribution of", column),
+         x = column,
+         y = "Frequency") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  # Add a density curve
+  p <- p + geom_density(aes(y = ..count.. * 30), color = "red", size = 1)
+  
+  # Add mean and median lines
+  mean_val <- mean(data[[column]], na.rm = TRUE)
+  median_val <- median(data[[column]], na.rm = TRUE)
+  p <- p + 
+    geom_vline(aes(xintercept = mean_val), color = "green", linetype = "dashed", size = 1) +
+    geom_vline(aes(xintercept = median_val), color = "purple", linetype = "dashed", size = 1) +
+    annotate("text", x = mean_val, y = Inf, label = "Mean", vjust = 2, color = "green") +
+    annotate("text", x = median_val, y = Inf, label = "Median", vjust = 4, color = "purple")
+  
+  # Apply log scale if requested
+  if (log_scale) {
+    p <- p + scale_x_log10()
+  }
+  
+  return(p)
+}
+```
+
+
+```{r}
+generate_histograms_for_columns <- function(data, columns, output_dir = NULL, log_scale = FALSE) {
+  # Create output directory if specified
+  if (!is.null(output_dir)) {
+    dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+  }
+  
+  # List to store all plots
+  plot_list <- list()
+  
+  for (column in columns) {
+    tryCatch({
+      print(paste("Processing column:", column))
+      
+      # Generate the plot
+      plot <- generate_improved_histogram(data, column, log_scale = log_scale)
+      
+      # Add the plot to the list
+      plot_list[[column]] <- plot
+      
+      # Save the plot if output directory is specified
+      if (!is.null(output_dir)) {
+        ggsave(filename = file.path(output_dir, paste0(column, ".png")), 
+               plot = plot, width = 10, height = 6)
+      }
+      
+      # Print the plot
+      print(plot)
+      
+    }, error = function(e) {
+      warning(paste("Error processing column:", column, "\nError message:", e$message))
+    })
+  }
+  
+  # Return the list of plots
+  return(plot_list)
 }
 
-# Example usage with a target dataset
-matched_data <- check_matches(Liei, npi_vector)
+ all_plots <- generate_histograms_for_columns(dmepos, columns_to_plot, output_dir = "histogram_plots")
+```
+
+The distribution looks much better now, Time to split into test and training sets
+```{r}
+set.seed(123)  # for reproducibility
+training_indices <- createDataPartition(dmepos$Exclusion, p = 0.7, list = FALSE)
+train_data <- dmepos[training_indices, ]
+test_data <- dmepos[-training_indices, ]
+```
+
+```{r}
+table(train_data$Exclusion)
+```
+
+```{r}
+dmepos_cleaned<-dmepos
+# Step 1: Prepare the data
+dmepos_cleaned <- dmepos_cleaned %>%
+  mutate(Exclusion = as.factor(Exclusion)) %>%
+  select_if(function(col) {
+    is.numeric(col) || 
+    (is.character(col) && all(col %in% c("0", "1"))) ||
+    (is.logical(col)) ||
+    all(col %in% c(0, 1)) ||
+    names(col) == "Exclusion"
+  })
+
+dmepos_cleaned <- na.omit(dmepos_cleaned)
+
+# Step 2: Split the data
+set.seed(123)
+training_indices <- createDataPartition(dmepos_cleaned$Exclusion, p = 0.7, list = FALSE)
+train_data <- dmepos_cleaned[training_indices, ]
+test_data <- dmepos_cleaned[-training_indices, ]
+
+# Print class distribution
+print("Class distribution in training data:")
+print(table(train_data$Exclusion))
+
+# Step 3: Handle class imbalance
+# Method 1: Up-sampling
+train_data_up <- upSample(x = train_data[, -which(names(train_data) == "Exclusion")],
+                          y = train_data$Exclusion,
+                          yname = "Exclusion")
+
+# Method 2: Down-sampling
+train_data_down <- downSample(x = train_data[, -which(names(train_data) == "Exclusion")],
+                              y = train_data$Exclusion,
+                              yname = "Exclusion")
+
+# Method 3: ROSE
+train_data_rose <- ROSE(Exclusion ~ ., data = train_data, seed = 123)$data
+
+# Print new class distributions
+print("Class distribution after up-sampling:")
+print(table(train_data_up$Exclusion))
+print("Class distribution after down-sampling:")
+print(table(train_data_down$Exclusion))
+print("Class distribution after ROSE:")
+print(table(train_data_rose$Exclusion))
+
+# Step 4: Build models
+model_original <- glm(Exclusion ~ ., data = train_data, family = binomial)
+model_up <- glm(Exclusion ~ ., data = train_data_up, family = binomial)
+model_down <- glm(Exclusion ~ ., data = train_data_down, family = binomial)
+model_rose <- glm(Exclusion ~ ., data = train_data_rose, family = binomial)
+
+# Step 5: Evaluate models
+evaluate_model <- function(model, test_data, model_name) {
+  predictions <- predict(model, newdata = test_data, type = "response")
+  predicted_classes <- ifelse(predictions > 0.5, 1, 0)
+  conf_matrix <- confusionMatrix(factor(predicted_classes), test_data$Exclusion)
+  roc_obj <- roc(test_data$Exclusion, predictions)
+  auc_value <- auc(roc_obj)
+  
+  cat("\n", model_name, "Results:\n")
+  print(conf_matrix)
+  cat("AUC:", auc_value, "\n")
+  
+  # Print top 10 most significant variables
+  coef_summary <- summary(model)$coefficients
+  significant_vars <- coef_summary[order(coef_summary[, "Pr(>|z|)"]), ]
+  print(head(significant_vars, 10))
+  
+  # Plot ROC curve
+  plot(roc_obj, main = paste("ROC Curve -", model_name))
+}
+
+evaluate_model(model_original, test_data, "Original Model")
+evaluate_model(model_up, test_data, "Up-sampled Model")
+evaluate_model(model_down, test_data, "Down-sampled Model")
+evaluate_model(model_rose, test_data, "ROSE Model")
+
+# Step 6: Feature importance (using up-sampled model as an example)
+importance <- varImp(model_up, scale = FALSE)
+print("Feature Importance:")
+print(importance)
+
+# Step 7: Odds ratios (using up-sampled model as an example)
+odds_ratios <- exp(coef(model_up))
+print("Odds Ratios:")
+print(odds_ratios)
+```
 
 
+We've tested this process out for the dmepos dataset, now lets do it for the rest
+
+### Medicare Part D
+```{r}
+# Define columns for outlier detection (excluding 'Exclusion')
+columns_to_process <- c(
+  "avg_total_claim_count", "sum_total_claim_count", "stddev_total_claim_count",
+  "min_total_claim_count", "max_total_claim_count", "avg_30_day_fill_count",
+  "sum_30_day_fill_count", "stddev_30_day_fill_count", "min_30_day_fill_count",
+  "max_30_day_fill_count", "avg_day_supply", "sum_day_supply", "stddev_day_supply",
+  "min_day_supply", "max_day_supply", "avg_drug_cost", "sum_drug_cost",
+  "stddev_drug_cost", "min_drug_cost", "max_drug_cost", "avg_bene_count",
+  "sum_bene_count", "stddev_bene_count", "min_bene_count", "max_bene_count"
+)
+
+# Apply outlier removal to medicare_part_d
+for (column in columns_to_process) {
+  tryCatch({
+    print(paste("Processing column:", column))
+    medicare_part_d <- remove_outliers(medicare_part_d, column)
+    print(paste("Rows remaining after processing", column, ":", nrow(medicare_part_d)))
+  }, error = function(e) {
+    print(paste("Error processing column:", column))
+    print(e)
+  })
+}
+
+# Generate histograms for the processed data
+all_plots_d <- generate_histograms_for_columns(medicare_part_d, columns_to_process, output_dir = "histogram_plots_part_d")
+
+# Prepare data for modeling
+medicare_part_d_cleaned <- medicare_part_d %>%
+  mutate(Exclusion = as.factor(Exclusion)) %>%
+  select_if(function(col) {
+    is.numeric(col) || 
+    (is.character(col) && all(col %in% c("0", "1"))) ||
+    (is.logical(col)) ||
+    all(col %in% c(0, 1)) ||
+    names(col) == "Exclusion"
+  })
+
+# Remove any remaining NA values
+medicare_part_d_cleaned <- na.omit(medicare_part_d_cleaned)
+
+# Check the structure of the cleaned dataset
+str(medicare_part_d_cleaned)
+
+# Print class distribution
+print("Class distribution in medicare_part_d_cleaned:")
+print(table(medicare_part_d_cleaned$Exclusion))
+
+# Split the data
+set.seed(123)
+training_indices_d <- createDataPartition(medicare_part_d_cleaned$Exclusion, p = 0.7, list = FALSE)
+train_data_d <- medicare_part_d_cleaned[training_indices_d, ]
+test_data_d <- medicare_part_d_cleaned[-training_indices_d, ]
+
+# Handle class imbalance
+train_data_up_d <- upSample(x = train_data_d[, -which(names(train_data_d) == "Exclusion")],
+                            y = train_data_d$Exclusion,
+                            yname = "Exclusion")
+
+train_data_down_d <- downSample(x = train_data_d[, -which(names(train_data_d) == "Exclusion")],
+                                y = train_data_d$Exclusion,
+                                yname = "Exclusion")
+
+train_data_rose_d <- ROSE(Exclusion ~ ., data = train_data_d, seed = 123)$data
+
+# Print new class distributions
+print("Class distribution after up-sampling (Part D):")
+print(table(train_data_up_d$Exclusion))
+print("Class distribution after down-sampling (Part D):")
+print(table(train_data_down_d$Exclusion))
+print("Class distribution after ROSE (Part D):")
+print(table(train_data_rose_d$Exclusion))
+
+# Build models
+model_original_d <- glm(Exclusion ~ ., data = train_data_d, family = binomial)
+model_up_d <- glm(Exclusion ~ ., data = train_data_up_d, family = binomial)
+model_down_d <- glm(Exclusion ~ ., data = train_data_down_d, family = binomial)
+model_rose_d <- glm(Exclusion ~ ., data = train_data_rose_d, family = binomial)
+
+# Evaluate models
+evaluate_model(model_original_d, test_data_d, "Original Model (Part D)")
+evaluate_model(model_up_d, test_data_d, "Up-sampled Model (Part D)")
+evaluate_model(model_down_d, test_data_d, "Down-sampled Model (Part D)")
+evaluate_model(model_rose_d, test_data_d, "ROSE Model (Part D)")
+
+# Feature importance (using up-sampled model as an example)
+importance_d <- varImp(model_up_d, scale = FALSE)
+print("Feature Importance (Part D):")
+print(importance_d)
+
+# Odds ratios (using up-sampled model as an example)
+odds_ratios_d <- exp(coef(model_up_d))
+print("Odds Ratios (Part D):")
+print(odds_ratios_d)
+```
+## Now for the Medicare Part B dataset
+
+```{r}
+# Define columns for outlier detection (excluding 'Exclusion')
+columns_to_process <- c(
+  "avg_bene_unique_cnt", "sum_bene_unique_cnt", "stddev_bene_unique_cnt",
+  "min_bene_unique_cnt", "max_bene_unique_cnt", "avg_line_srvc_cnt",
+  "sum_line_srvc_cnt", "stddev_line_srvc_cnt", "min_line_srvc_cnt",
+  "max_line_srvc_cnt", "avg_bene_day_srvc_cnt", "sum_bene_day_srvc_cnt",
+  "stddev_bene_day_srvc_cnt", "min_bene_day_srvc_cnt", "max_bene_day_srvc_cnt",
+  "avg_submitted_chrg_amt", "stddev_submitted_chrg_amt", "min_submitted_chrg_amt",
+  "max_submitted_chrg_amt", "avg_medicare_payment_amt", "stddev_medicare_payment_amt",
+  "min_medicare_payment_amt", "max_medicare_payment_amt"
+)
+
+# Apply outlier removal to medicare_part_b
+for (column in columns_to_process) {
+  tryCatch({
+    print(paste("Processing column:", column))
+    medicare_part_b <- remove_outliers(medicare_part_b, column)
+    print(paste("Rows remaining after processing", column, ":", nrow(medicare_part_b)))
+  }, error = function(e) {
+    print(paste("Error processing column:", column))
+    print(e)
+  })
+}
+
+# Generate histograms for the processed data
+all_plots_b <- generate_histograms_for_columns(medicare_part_b, columns_to_process, output_dir = "histogram_plots_part_b")
+
+# Prepare data for modeling
+medicare_part_b_cleaned <- medicare_part_b %>%
+  mutate(Exclusion = as.factor(Exclusion)) %>%
+  select_if(function(col) {
+    is.numeric(col) || 
+    (is.character(col) && all(col %in% c("0", "1"))) ||
+    (is.logical(col)) ||
+    all(col %in% c(0, 1)) ||
+    names(col) == "Exclusion"
+  })
+
+# Remove any remaining NA values
+medicare_part_b_cleaned <- na.omit(medicare_part_b_cleaned)
+
+# Check the structure of the cleaned dataset
+str(medicare_part_b_cleaned)
+
+# Print class distribution
+print("Class distribution in medicare_part_b_cleaned:")
+print(table(medicare_part_b_cleaned$Exclusion))
+
+# Split the data
+set.seed(123)
+training_indices_b <- createDataPartition(medicare_part_b_cleaned$Exclusion, p = 0.7, list = FALSE)
+train_data_b <- medicare_part_b_cleaned[training_indices_b, ]
+test_data_b <- medicare_part_b_cleaned[-training_indices_b, ]
+
+# Handle class imbalance
+train_data_up_b <- upSample(x = train_data_b[, -which(names(train_data_b) == "Exclusion")],
+                            y = train_data_b$Exclusion,
+                            yname = "Exclusion")
+
+train_data_down_b <- downSample(x = train_data_b[, -which(names(train_data_b) == "Exclusion")],
+                                y = train_data_b$Exclusion,
+                                yname = "Exclusion")
+
+train_data_rose_b <- ROSE(Exclusion ~ ., data = train_data_b, seed = 123)$data
+
+# Print new class distributions
+print("Class distribution after up-sampling (Part B):")
+print(table(train_data_up_b$Exclusion))
+print("Class distribution after down-sampling (Part B):")
+print(table(train_data_down_b$Exclusion))
+print("Class distribution after ROSE (Part B):")
+print(table(train_data_rose_b$Exclusion))
+
+# Build models
+model_original_b <- glm(Exclusion ~ ., data = train_data_b, family = binomial)
+model_up_b <- glm(Exclusion ~ ., data = train_data_up_b, family = binomial)
+model_down_b <- glm(Exclusion ~ ., data = train_data_down_b, family = binomial)
+model_rose_b <- glm(Exclusion ~ ., data = train_data_rose_b, family = binomial)
+
+# Evaluate models
+evaluate_model(model_original_b, test_data_b, "Original Model (Part B)")
+evaluate_model(model_up_b, test_data_b, "Up-sampled Model (Part B)")
+evaluate_model(model_down_b, test_data_b, "Down-sampled Model (Part B)")
+evaluate_model(model_rose_b, test_data_b, "ROSE Model (Part B)")
+
+# Feature importance (using up-sampled model as an example)
+importance_b <- varImp(model_up_b, scale = FALSE)
+print("Feature Importance (Part B):")
+print(importance_b)
+
+# Odds ratios (using up-sampled model as an example)
+odds_ratios_b <- exp(coef(model_up_b))
+print("Odds Ratios (Part B):")
+print(odds_ratios_b)
+```
+
+### And Finally for the Combined Dataset, there are very few fraud labeled data within the combined dataset, so we wont be removing outliers
+
+```{r}
+# Data cleaning (without removing fraudulent rows)
+combined_dataset_cleaned <- combined_dataset %>%
+  mutate(Exclusion = as.factor(Exclusion)) %>%
+  select_if(function(col) {
+    is.numeric(col) || 
+    (is.character(col) && all(col %in% c("0", "1"))) ||
+    (is.logical(col)) ||
+    all(col %in% c(0, 1)) ||
+    names(col) == "Exclusion"
+  })
+
+combined_dataset_cleaned <- na.omit(combined_dataset_cleaned)
+
+# Print class distribution
+print("Class distribution in combined_dataset_cleaned:")
+print(table(combined_dataset_cleaned$Exclusion))
+
+# Split the data
+set.seed(123)
+training_indices_combined <- createDataPartition(combined_dataset_cleaned$Exclusion, p = 0.7, list = FALSE)
+train_data_combined <- combined_dataset_cleaned[training_indices_combined, ]
+test_data_combined <- combined_dataset_cleaned[-training_indices_combined, ]
+
+# Handle class imbalance
+train_data_up_combined <- upSample(x = train_data_combined[, -which(names(train_data_combined) == "Exclusion")],
+                                   y = train_data_combined$Exclusion,
+                                   yname = "Exclusion")
+
+train_data_down_combined <- downSample(x = train_data_combined[, -which(names(train_data_combined) == "Exclusion")],
+                                       y = train_data_combined$Exclusion,
+                                       yname = "Exclusion")
+
+train_data_rose_combined <- ROSE(Exclusion ~ ., data = train_data_combined, seed = 123)$data
+
+# Print new class distributions
+print("Class distribution after up-sampling (Combined):")
+print(table(train_data_up_combined$Exclusion))
+print("Class distribution after down-sampling (Combined):")
+print(table(train_data_down_combined$Exclusion))
+print("Class distribution after ROSE (Combined):")
+print(table(train_data_rose_combined$Exclusion))
+
+# Build models
+model_original_combined <- glm(Exclusion ~ ., data = train_data_combined, family = binomial)
+model_up_combined <- glm(Exclusion ~ ., data = train_data_up_combined, family = binomial)
+model_down_combined <- glm(Exclusion ~ ., data = train_data_down_combined, family = binomial)
+model_rose_combined <- glm(Exclusion ~ ., data = train_data_rose_combined, family = binomial)
+
+# Evaluate models
+evaluate_model(model_original_combined, test_data_combined, "Original Model (Combined)")
+evaluate_model(model_up_combined, test_data_combined, "Up-sampled Model (Combined)")
+evaluate_model(model_down_combined, test_data_combined, "Down-sampled Model (Combined)")
+evaluate_model(model_rose_combined, test_data_combined, "ROSE Model (Combined)")
+
+# Feature importance (using up-sampled model as an example)
+importance_combined <- varImp(model_up_combined, scale = FALSE)
+print("Feature Importance (Combined):")
+print(importance_combined)
+
+# Odds ratios (using up-sampled model as an example)
+odds_ratios_combined <- exp(coef(model_up_combined))
+print("Odds Ratios (Combined):")
+print(odds_ratios_combined)
 ```
 
 
@@ -164,127 +867,917 @@ matched_data <- check_matches(Liei, npi_vector)
 
 
 
+## NEW Models
 
+### PART D
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-### Retreive Census Data
-
-For Years 2013-2022 (which are the years overlapping for each)
-ZIP5 Level
+#### RF
 
 ```{r}
 
-api_key <- "f06f71d603f36419f4e0b03b2ac199c4157468e4"
+library(randomForest)
 
-census_api_key(api_key, install = TRUE)
-```
+set.seed(698)
 
-```{r}
-years <- 2013:2022
 
-variables <- c(
-  # Demographics: Race and ethnicity
-  total_population = "B02001_001",
-  white_alone = "B02001_002",
-  black_alone = "B02001_003",
-  american_indian_alone = "B02001_004",
-  asian_alone = "B02001_005",
-  hispanic_latino = "B03002_012",
-  
-  # Education
-  total_population_25_over = "B15003_001",
-  bachelors_degree = "B15003_017",
-  graduate_professional_degree = "B15003_022",
-  
-  # Language spoken at home
-  total_population_5_over = "B16001_001",
-  english_only = "B16001_002",
-  spanish = "B16001_003",
-  indo_european_languages = "B16001_006",
-  asian_pacific_languages = "B16001_009",
-  
-  # Income
-  median_income = "B19013_001"
+train_data_rose_d
+test_data_d
+
+#Scaling to produce better results
+
+preprocess_partd <- preProcess(train_data_rose_d, 
+                             method = c("center", "scale", "zv", "nzv"),  # Add zero/near-zero variance removal
+                             )
+
+train_data_d_scaled = predict(preprocess_partd, train_data_rose_d)
+
+test_data_d_scaled=predict(preprocess_partd,test_data_d)
+
+
+# 5 Fold Validation and tuning grid to find best mtry value
+
+tune_grid <- expand.grid(
+    mtry = seq(floor(sqrt(ncol(train_data_d_scaled))), 
+               floor(ncol(train_data_d_scaled)/3),
+               length.out = 5)
+)
+control <- trainControl(
+    method = "cv",
+    number = 5,
+    classProbs = TRUE,           # Required for ROC calculation
+    summaryFunction = twoClassSummary,  # Use summary function for 2 class problems
+    verboseIter = TRUE,
+    savePredictions = "final",
+    returnResamp = "all"
+)
+
+# First convert Exclusion to factor with valid R names
+train_data_d_scaled$Exclusion <- factor(train_data_d_scaled$Exclusion, 
+                                      levels = c(0, 1), 
+                                      labels = c("No", "Yes"))
+test_data_d_scaled$Exclusion <- factor(test_data_d_scaled$Exclusion, 
+                                     levels = c(0, 1), 
+                                     labels = c("No", "Yes"))
+
+
+
+rf_model_d <- train(
+    Exclusion ~ .,
+    data = train_data_d_scaled,
+    method = "rf",
+    trControl = control,
+    tuneGrid = tune_grid,
+    ntree = 500,
+    importance = TRUE,
+    metric = "ROC"
+)
+
+# 6. Model evaluation
+print(rf_model_d)
+print(rf_model_d$bestTune)
+
+# 7. Variable importance with better visualization
+var_importance_d <- varImp(rf_model_d, scale = TRUE)
+plot(var_importance_d, top = 20)
+
+# 8. Make predictions
+predicted_exclusions_scaled <- predict(rf_model_d, newdata = test_data_d_scaled)
+predicted_probs <- predict(rf_model_d, newdata = test_data_d_scaled, type = "prob")
+
+# 9. Evaluate performance
+confusionMatrix(predicted_exclusions_scaled, test_data_d_scaled$Exclusion)
+
+# Perform feature selection before modeling
+rf_importance <- randomForest(Exclusion ~ ., data = train_data_d_scaled, importance = TRUE)
+important_features <- importance(rf_importance)
+selected_features <- names(important_features[important_features > mean(important_features)])
+
+# Add more parameters to tune
+tune_grid <- expand.grid(
+    mtry = seq(floor(sqrt(ncol(train_data_d_scaled))), 
+               floor(ncol(train_data_d_scaled)/3),
+               length.out = 5),
+    min.node.size = c(1, 3, 5),
+    splitrule = c("gini", "extratrees")
 )
 
 
-census_data <- map_df(years, function(year) {
-  get_acs(
-    geography = "zip code tabulation area",  
-    variables = variables,                   
-    year = year,                             
-    survey = "acs5",                         
-    output = "wide"                          
-  ) %>%
-  mutate(year = year)                        
-})
-
-census_data= census_data %>%
-  select(-NAME)
+# Calculate additional metrics
+library(pROC)
+roc_curve <- roc(test_data_d_scaled$Exclusion, predicted_probs[,2])
+plot(roc_curve)
+auc(roc_curve)
 
 
-headers <- headers(res)
-print(headers)
+
+
 
 ```
 
 
-### Trying to get all cms data using API
+MODEL IS OVERFIT!!!!!
 
 
+
+#### RF 2
 
 ```{r}
-get_paginated_data <- function(base_url, size = 5000) {
-  offset <- 0
-  all_data <- list()
-  
-  repeat {
-    res <- GET(paste0(base_url, "?size=", size, "&offset=", offset))
-    data <- fromJSON(rawToChar(res$content))
-    
-    if (length(data) == 0) break  # Stop if no more data
-    
-    all_data <- append(all_data, list(data))
-    offset <- offset + size
-  }
-  
-  return(bind_rows(all_data))
-}
 
-# Base URLs for each dataset
-url_1 <- "https://data.cms.gov/data-api/v1/dataset/76a714ad-3a2c-43ac-b76d-9dadf8f7d890/data"
-url_2 <- "https://data.cms.gov/data-api/v1/dataset/9552739e-3d05-4c1b-8eff-ecabf391e2e5/data"
-url_3 <- "https://data.cms.gov/data-api/v1/dataset/c8ea3f8e-3a09-4fea-86f2-8902fb4b0920/data"
-url_4 <- "https://data.cms.gov/data-api/v1/dataset/1746a83e-bb65-4300-8e02-21edbab77c6b/data"
+# 1. Feature Selection based on importance
+# First get initial importance scores
+initial_rf <- randomForest(
+    Exclusion ~ ., 
+    data = train_data_d_scaled,
+    ntree = 100,
+    importance = TRUE
+)
 
-# Retrieve data for each dataset
-Medicare_Part_B <- get_paginated_data(url_1)
-Medicare_Part_D_Prov <- get_paginated_data(url_2)
-Medicare_Part_D_Geo <- get_paginated_data(url_3)
-DMEPOS <- get_paginated_data(url_4)
+# Get importance scores and select top features
+importance_scores <- importance(initial_rf, type = 2) # Type 2 for Mean Decrease in Gini
+importance_df <- data.frame(
+    feature = row.names(importance_scores),
+    importance = importance_scores[, "MeanDecreaseGini"]
+)
+importance_df <- importance_df[order(importance_df$importance, decreasing = TRUE), ]
 
+# Select top 20 most important features
+top_features <- importance_df$feature[1:20]
+
+# Create reduced dataset with only top features
+train_reduced <- train_data_d_scaled[, c(top_features, "Exclusion")]
+test_reduced <- test_data_d_scaled[, c(top_features, "Exclusion")]
+
+# 2. Setup cross-validation with more robust metrics
+control <- trainControl(
+    method = "cv",
+    number = 5,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary,
+    savePredictions = TRUE,
+    verboseIter = TRUE,
+    returnResamp = "all"
+)
+
+# 3. Create a more focused tuning grid
+tune_grid <- expand.grid(
+    mtry = seq(2, sqrt(length(top_features)), length.out = 5)
+)
+
+# 4. Train reduced complexity model
+rf_model_reduced <- train(
+    Exclusion ~ .,
+    data = train_reduced,
+    method = "rf",
+    trControl = control,
+    tuneGrid = tune_grid,
+    ntree = 300,  # Reduced number of trees
+    importance = TRUE,
+    metric = "ROC"
+)
+
+# 5. Make predictions
+predictions <- predict(rf_model_reduced, newdata = test_reduced)
+pred_probs <- predict(rf_model_reduced, newdata = test_reduced, type = "prob")
+
+# 6. Evaluate model
+conf_matrix <- confusionMatrix(predictions, test_reduced$Exclusion)
+print(conf_matrix)
+
+# 7. Plot ROC curve
+roc_curve <- roc(test_reduced$Exclusion, pred_probs[,"Yes"])
+plot(roc_curve, main = "ROC Curve for Reduced Model")
+auc_value <- auc(roc_curve)
+print(paste("AUC:", auc_value))
+
+# 8. Feature importance plot
+var_importance <- varImp(rf_model_reduced)
+plot(var_importance, top = 10)
+
+# 9. Print model summary
+print(rf_model_reduced)
+print(rf_model_reduced$bestTune)
 ```
+Model Improvements:
+
+
+Reduced features from 111 to 20 most important predictors
+AUC improved from 0.7429 to 0.7103 (slightly worse but more stable)
+Simplified model with mtry = 2 (fewer variables considered at each split)
+
+
+Model Performance Metrics:
+
+
+Training metrics still show perfect performance (ROC=1, Sens=1, Spec=1)
+Test performance isn't great:
+
+Sensitivity: 0 (poor at detecting true negatives)
+Specificity: 1.0 (good at detecting true positives)
+Balanced Accuracy: 0.50 (no better than random chance)
+
+
+
+
+
+
+
+
+#### XG BOOST
+
+With 5-fold cross-validation:
+1,458 × 5 = 7,290 total iterations
+
+```{r}
+# 1. Install and load required packages
+library(xgboost)
+
+
+# 2. Prepare data for xgboost (convert to matrix format)
+# Convert factor response to numeric
+train_reduced$Exclusion <- as.numeric(train_reduced$Exclusion) + 1
+test_reduced$Exclusion <- as.numeric(test_reduced$Exclusion) + 1
+
+
+
+# Convert to matrix format
+train_matrix <- model.matrix(~.-1, data = train_reduced[, !names(train_reduced) %in% "Exclusion"])
+test_matrix <- model.matrix(~.-1, data = test_reduced[, !names(test_reduced) %in% "Exclusion"])
+
+# Create xgb.DMatrix objects
+dtrain <- xgb.DMatrix(data = train_matrix, label = train_reduced$Exclusion)
+dtest <- xgb.DMatrix(data = test_matrix, label = test_reduced$Exclusion)
+
+# 3. Set up cross-validation control
+xgb_control <- trainControl(
+ method = "cv",
+ number = 5,
+ verboseIter = TRUE,
+ classProbs = TRUE,
+ summaryFunction = twoClassSummary,
+ allowParallel = TRUE
+)
+
+# 4. Define parameter grid for tuning
+xgb_grid_focused <- expand.grid(
+  nrounds = c(100, 200),
+  max_depth = c(3, 6),
+  eta = c(0.1),
+  gamma = c(0),
+  colsample_bytree = c(0.8),
+  min_child_weight = c(1),
+  subsample = c(0.8)
+)
+
+# 5. Train XGBoost model with parameter tuning
+xgb_model <- train(
+  x = train_matrix,
+  y = factor(train_reduced$Exclusion, labels = c("No", "Yes")),
+  method = "xgbTree",
+  trControl = xgb_control,
+  tuneGrid = xgb_grid_focused,
+  metric = "ROC",
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  verbose = TRUE
+)
+
+
+# 6. Make predictions
+xgb_pred <- predict(xgb_model, newdata = test_matrix)
+xgb_pred_probs <- predict(xgb_model, newdata = test_matrix, type = "prob")
+
+# 7. Evaluate model performance
+xgb_conf_matrix <- confusionMatrix(xgb_pred, factor(test_reduced$Exclusion, labels = c("No", "Yes")))
+print("Confusion Matrix:")
+print(xgb_conf_matrix)
+
+# 8. Plot ROC curve
+xgb_roc <- roc(test_reduced$Exclusion, xgb_pred_probs[,"Yes"])
+plot(xgb_roc, main = "ROC Curve for XGBoost Model")
+auc_value <- auc(xgb_roc)
+print(paste("AUC:", auc_value))
+
+# 9. Feature importance
+importance_matrix <- xgb.importance(feature_names = colnames(train_matrix), model = xgb_model$finalModel)
+print("Feature Importance:")
+print(importance_matrix)
+
+# Plot feature importance
+xgb.plot.importance(importance_matrix[1:10,])
+
+# 10. Print best tuning parameters
+print("Best Tuning Parameters:")
+print(xgb_model$bestTune)
+
+# 11. Early stopping monitoring
+watchlist <- list(train = dtrain, test = dtest)
+
+# 12. Final model with best parameters and early stopping
+final_xgb <- xgb.train(
+ params = list(
+   objective = "binary:logistic",
+   max_depth = xgb_model$bestTune$max_depth,
+   eta = xgb_model$bestTune$eta,
+   gamma = xgb_model$bestTune$gamma,
+   colsample_bytree = xgb_model$bestTune$colsample_bytree,
+   min_child_weight = xgb_model$bestTune$min_child_weight,
+   subsample = xgb_model$bestTune$subsample
+ ),
+ data = dtrain,
+ nrounds = xgb_model$bestTune$nrounds,
+ watchlist = watchlist,
+ early_stopping_rounds = 50,
+ print_every_n = 10
+)
+
+# 13. Save important metrics to file
+results <- data.frame(
+ AUC = auc_value,
+ Accuracy = xgb_conf_matrix$overall["Accuracy"],
+ Sensitivity = xgb_conf_matrix$byClass["Sensitivity"],
+ Specificity = xgb_conf_matrix$byClass["Specificity"]
+)
+
+write.csv(results, "xgboost_results.csv")
+```
+
+"AUC: 0.681254609144543"
+Confusion Matrix and Statistics
+
+          Reference
+Prediction    No   Yes
+       No   2927     0
+       Yes 18769     1
+                                          
+               Accuracy : 0.1349          
+                 95% CI : (0.1304, 0.1396)
+    No Information Rate : 1               
+    P-Value [Acc > NIR] : 1               
+                                          
+                  Kappa : 0               
+                                          
+ Mcnemar's Test P-Value : <2e-16          
+                                          
+            Sensitivity : 1.349e-01       
+            Specificity : 1.000e+00       
+         Pos Pred Value : 1.000e+00       
+         Neg Pred Value : 5.328e-05       
+             Prevalence : 1.000e+00       
+         Detection Rate : 1.349e-01       
+   Detection Prevalence : 1.349e-01       
+      Balanced Accuracy : 5.675e-01       
+                                          
+       'Positive' Class : No 
+       
+       eature
+<chr>
+Gain
+<dbl>
+Cover
+<dbl>
+Frequency
+<dbl>
+specialty_Physician.Assistant	8.538231e-01	8.125774e-01	0.756476684	
+specialty_Nurse.Practitioner	1.133226e-01	1.429470e-01	0.186528497	
+specialty_Student.in.an.Organized.Health.Care.Education.Training.Program	3.285063e-02	4.444975e-02	0.046632124	
+specialty_Internal.Medicine	1.839998e-06	1.304318e-05	0.005181347	
+specialty_General.Surgery	1.806344e-06	1.279815e-05	0.005181347	
+
+best tuned:
+
+ 
+ 
+nrounds
+<dbl>
+max_depth
+<dbl>
+eta
+<dbl>
+gamma
+<dbl>
+colsample_bytree
+<dbl>
+min_child_weight
+<dbl>
+subsample
+<dbl>
+1	100	3	0.1	0	0.8	1	0.8
+
+most optimal 
+ 
+ 
+AUC
+<dbl>
+Accuracy
+<dbl>
+Sensitivity
+<dbl>
+Specificity
+<dbl>
+Accuracy	0.6812546	0.1349495	0.1349097	1
+
+
+### PART B
+
+#### RF
+
+```{r}
+preprocess_partb <- preProcess(train_data_rose_b, 
+                             method = c("center", "scale", "zv", "nzv"),  # Add zero/near-zero variance removal
+                             )
+
+train_data_b_scaled = predict(preprocess_partb, train_data_rose_b)
+
+test_data_b_scaled=predict(preprocess_partb,test_data_b)
+
+ 
+# First get initial importance scores
+initial_rf2 <- randomForest(
+    Exclusion ~ ., 
+    data = train_data_b_scaled,
+    ntree = 100,
+    importance = TRUE
+)
+
+# Get importance scores and select top features
+importance_scores2 <- importance(initial_rf2, type = 2) # Type 2 for Mean Decrease in Gini
+importance_df2 <- data.frame(
+    feature = row.names(importance_scores2),
+    importance = importance_scores2[, "MeanDecreaseGini"]
+)
+importance_df2 <- importance_df2[order(importance_df2$importance, decreasing = TRUE), ]
+
+# Select top 20 most important features
+top_features2 <- importance_df2$feature[1:20]
+
+# Create reduced dataset with only top features
+train_reduced2 <- train_data_b_scaled[, c(top_features2, "Exclusion")]
+test_reduced2 <- test_data_b_scaled[, c(top_features2, "Exclusion")]
+
+train_reduced2$Exclusion <- factor(train_reduced2$Exclusion, 
+                                 levels = c(0, 1), 
+                                 labels = c("No", "Yes"))
+test_reduced2$Exclusion <- factor(test_reduced2$Exclusion, 
+                                levels = c(0, 1), 
+                                labels = c("No", "Yes"))
+
+# 2. Setup cross-validation with more robust metrics
+control2 <- trainControl(
+    method = "cv",
+    number = 5,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary,
+    savePredictions = TRUE,
+    verboseIter = TRUE,
+    returnResamp = "all"
+)
+
+# 3. Create a more focused tuning grid
+tune_grid <- expand.grid(
+    mtry = seq(2, sqrt(length(top_features2)), length.out = 5)
+)
+
+# 4. Train reduced complexity model
+rf_model_reduced2 <- train(
+    Exclusion ~ .,
+    data = train_reduced2,
+    method = "rf",
+    trControl = control2,
+    tuneGrid = tune_grid,
+    ntree = 300,  # Reduced number of trees
+    importance = TRUE,
+    metric = "ROC"
+)
+
+# 5. Make predictions
+predictions2 <- predict(rf_model_reduced2, newdata = test_reduced2)
+pred_probs2 <- predict(rf_model_reduced2, newdata = test_reduced2, type = "prob")
+
+# 6. Evaluate model
+conf_matrix2 <- confusionMatrix(predictions2, test_reduced2$Exclusion)
+print(conf_matrix2)
+
+# 7. Plot ROC curve
+roc_curve2 <- roc(test_reduced2$Exclusion, pred_probs2[,"Yes"])
+plot(roc_curve2, main = "ROC Curve for Reduced Model")
+auc_value2 <- auc(roc_curve2)
+print(paste("AUC:", auc_value2))
+
+# 8. Feature importance plot
+var_importance2 <- varImp(rf_model_reduced2)
+plot(var_importance2, top = 10)
+
+# 9. Print model summary
+print(rf_model_reduced2)
+print(rf_model_reduced2$bestTune)
+```
+         Reference
+Prediction     No    Yes
+       No       0      0
+       Yes 114997     12
+                                        
+               Accuracy : 1e-04         
+                 95% CI : (1e-04, 2e-04)
+    No Information Rate : 0.9999        
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0             
+                                        
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.0000000     
+            Specificity : 1.0000000     
+         Pos Pred Value :       NaN     
+         Neg Pred Value : 0.0001043     
+             Prevalence : 0.9998957     
+         Detection Rate : 0.0000000     
+   Detection Prevalence : 0.0000000     
+      Balanced Accuracy : 0.5000000     
+                                        
+       'Positive' Class : No       
+       
+       [1] "AUC: 0.498923884970912"
+       
+
+Random Forest 
+
+268358 samples
+    20 predictor
+     2 classes: 'No', 'Yes' 
+
+No pre-processing
+Resampling: Cross-Validated (5 fold) 
+Summary of sample sizes: 214686, 214687, 214686, 214687, 214686 
+Resampling results across tuning parameters:
+
+  mtry      ROC  Sens  Spec
+  2.000000  1    1     1   
+  2.618034  1    1     1   
+  3.236068  1    1     1   
+  3.854102  1    1     1   
+  4.472136  1    1     1   
+
+ROC was used to select the optimal model using the largest value.
+The final value used for the model was mtry = 2.
+> print(rf_model_reduced2$bestTune)
+  mtry
+1    2
+
+
+
+#### XG BOOST
+
+```{r}
+ 
+# Convert factor response to numeric
+train_reduced2$Exclusion <- ifelse(train_reduced2$Exclusion == 2, 0, 1)
+test_reduced2$Exclusion <- ifelse(test_reduced2$Exclusion == 2, 0, 1)
+
+
+
+
+# Convert to matrix format
+train_matrix2 <- model.matrix(~.-1, data = train_reduced2[, !names(train_reduced2) %in% "Exclusion"])
+test_matrix2 <- model.matrix(~.-1, data = test_reduced2[, !names(test_reduced2) %in% "Exclusion"])
+
+# Create xgb.DMatrix objects
+dtrain2 <- xgb.DMatrix(data = train_matrix2, label = train_reduced2$Exclusion)
+dtest2 <- xgb.DMatrix(data = test_matrix2, label = test_reduced2$Exclusion)
+
+# 3. Set up cross-validation control
+xgb_control <- trainControl(
+ method = "cv",
+ number = 5,
+ verboseIter = TRUE,
+ classProbs = TRUE,
+ summaryFunction = twoClassSummary,
+ allowParallel = TRUE
+)
+
+# 4. Define parameter grid for tuning
+xgb_grid_focused <- expand.grid(
+  nrounds = c(100, 200),
+  max_depth = c(3, 6),
+  eta = c(0.1),
+  gamma = c(0),
+  colsample_bytree = c(0.8),
+  min_child_weight = c(1),
+  subsample = c(0.8)
+)
+
+# 5. Train XGBoost model with parameter tuning
+xgb_model2 <- train(
+  x = train_matrix2,
+  y = factor(train_reduced2$Exclusion, labels = c("No", "Yes")),
+  method = "xgbTree",
+  trControl = xgb_control,
+  tuneGrid = xgb_grid_focused,
+  metric = "ROC",
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  verbose = TRUE
+)
+
+
+# 6. Make predictions
+xgb_pred2 <- predict(xgb_model2, newdata = test_matrix2)
+xgb_pred_probs2 <- predict(xgb_model2, newdata = test_matrix2, type = "prob")
+
+# 7. Evaluate model performance
+xgb_conf_matrix2 <- confusionMatrix(xgb_pred2, factor(test_reduced2$Exclusion, labels = c("No", "Yes")))
+print("Confusion Matrix:")
+print(xgb_conf_matrix2)
+
+# 8. Plot ROC curve
+xgb_roc2 <- roc(test_reduced2$Exclusion, xgb_pred_probs2[,"Yes"])
+plot(xgb_roc2, main = "ROC Curve for XGBoost Model")
+auc_value2 <- auc(xgb_roc2)
+print(paste("AUC:", auc_value2))
+
+# 9. Feature importance
+importance_matrix2 <- xgb.importance(feature_names = colnames(train_matrix2), model = xgb_model2$finalModel)
+print("Feature Importance:")
+print(importance_matrix2)
+
+# Plot feature importance
+xgb.plot.importance(importance_matrix2[1:10,])
+
+# 10. Print best tuning parameters
+print("Best Tuning Parameters:")
+print(xgb_model2$bestTune)
+
+# 11. Early stopping monitoring
+watchlist2 <- list(train = dtrain2, test = dtest2)
+
+# 12. Final model with best parameters and early stopping
+final_xgb2 <- xgb.train(
+ params = list(
+   objective = "binary:logistic",
+   max_depth = xgb_model2$bestTune$max_depth,
+   eta = xgb_model2$bestTune$eta,
+   gamma = xgb_model2$bestTune$gamma,
+   colsample_bytree = xgb_model2$bestTune$colsample_bytree,
+   min_child_weight = xgb_model2$bestTune$min_child_weight,
+   subsample = xgb_model2$bestTune$subsample
+ ),
+ data = dtrain2,
+ nrounds = xgb_model2$bestTune$nrounds,
+ watchlist = watchlist2,
+ early_stopping_rounds = 50,
+ print_every_n = 10
+)
+
+# 13. Save important metrics to file
+results2 <- data.frame(
+ AUC = auc_value2,
+ Accuracy = xgb_conf_matrix2$overall["Accuracy"],
+ Sensitivity = xgb_conf_matrix2$byClass["Sensitivity"],
+ Specificity = xgb_conf_matrix2$byClass["Specificity"]
+)
+
+write.csv(results2, "xgboost_results2.csv")
+```
+
+rint(xgb_conf_matrix2)
+Confusion Matrix and Statistics
+
+          Reference
+Prediction     No    Yes
+       No       0      0
+       Yes 114997     12
+                                        
+               Accuracy : 1e-04         
+                 95% CI : (1e-04, 2e-04)
+    No Information Rate : 0.9999        
+    P-Value [Acc > NIR] : 1             
+                                        
+                  Kappa : 0             
+                                        
+ Mcnemar's Test P-Value : <2e-16        
+                                        
+            Sensitivity : 0.0000000     
+            Specificity : 1.0000000     
+         Pos Pred Value :       NaN     
+         Neg Pred Value : 0.0001043     
+             Prevalence : 0.9998957     
+         Detection Rate : 0.0000000     
+   Detection Prevalence : 0.0000000     
+      Balanced Accuracy : 0.5000000     
+                                        
+       'Positive' Class : No    
+
+[1] "AUC: 0.533987843161126"
+
+results2
+               AUC     Accuracy Sensitivity Specificity
+Accuracy 0.5339878 0.0001043397           0           1
+
+
+### COMBINED DS
+
+#### RF
+
+```{r}
+preprocess_combine <- preProcess(train_data_rose_combined, 
+                             method = c("center", "scale", "zv", "nzv"),  # Add zero/near-zero variance removal
+                             )
+
+train_data_combined_scaled = predict(preprocess_combine, train_data_rose_combined)
+
+test_data_combined_scaled=predict(preprocess_combine,test_data_combined)
+
+ 
+# First get initial importance scores
+initial_rf3 <- randomForest(
+    Exclusion ~ ., 
+    data = train_data_combined_scaled,
+    ntree = 100,
+    importance = TRUE
+)
+
+# Get importance scores and select top features
+importance_scores3 <- importance(initial_rf3, type = 2) # Type 2 for Mean Decrease in Gini
+importance_df3 <- data.frame(
+    feature = row.names(importance_scores3),
+    importance = importance_scores3[, "MeanDecreaseGini"]
+)
+importance_df3 <- importance_df3[order(importance_df3$importance, decreasing = TRUE), ]
+
+# Select top 20 most important features
+top_features3 <- importance_df3$feature[1:20]
+
+# Create reduced dataset with only top features
+train_reduced3 <- train_data_combined_scaled[, c(top_features3, "Exclusion")]
+test_reduced3 <- test_data_combined_scaled[, c(top_features3, "Exclusion")]
+
+train_reduced3$Exclusion <- factor(train_reduced3$Exclusion, 
+                                 levels = c(0, 1), 
+                                 labels = c("No", "Yes"))
+test_reduced3$Exclusion <- factor(test_reduced3$Exclusion, 
+                                levels = c(0, 1), 
+                                labels = c("No", "Yes"))
+
+# 2. Setup cross-validation with more robust metrics
+control3 <- trainControl(
+    method = "cv",
+    number = 5,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary,
+    savePredictions = TRUE,
+    verboseIter = TRUE,
+    returnResamp = "all"
+)
+
+# 3. Create a more focused tuning grid
+tune_grid <- expand.grid(
+    mtry = seq(2, sqrt(length(top_features3)), length.out = 5)
+)
+
+# 4. Train reduced complexity model
+rf_model_reduced3 <- train(
+    Exclusion ~ .,
+    data = train_reduced3,
+    method = "rf",
+    trControl = control3,
+    tuneGrid = tune_grid,
+    ntree = 300,  # Reduced number of trees
+    importance = TRUE,
+    metric = "ROC"
+)
+
+# 5. Make predictions
+predictions3 <- predict(rf_model_reduced3, newdata = test_reduced3)
+pred_probs3 <- predict(rf_model_reduced3, newdata = test_reduced3, type = "prob")
+
+# 6. Evaluate model
+conf_matrix3 <- confusionMatrix(predictions3, test_reduced3$Exclusion)
+print(conf_matrix3)
+
+# 7. Plot ROC curve
+roc_curve3 <- roc(test_reduced3$Exclusion, pred_probs3[,"Yes"])
+plot(roc_curve3, main = "ROC Curve for Reduced Model")
+auc_value3 <- auc(roc_curve3)
+print(paste("AUC:", auc_value3))
+
+# 8. Feature importance plot
+var_importance3 <- varImp(rf_model_reduced2)
+plot(var_importance3, top = 10)
+
+# 9. Print model summary
+print(rf_model_reduced3)
+print(rf_model_reduced3$bestTune)
+```
+
+#### XG BOOST
+
+```{r}
+ 
+# Convert factor response to numeric
+train_reduced3$Exclusion <- as.numeric(train_reduced2$Exclusion) + 1
+test_reduced3$Exclusion <- as.numeric(test_reduced2$Exclusion) + 1
+
+
+
+
+# Convert to matrix format
+train_matrix3 <- model.matrix(~.-1, data = train_reduced3[, !names(train_reduced2) %in% "Exclusion"])
+test_matrix3 <- model.matrix(~.-1, data = test_reduced3[, !names(test_reduced2) %in% "Exclusion"])
+
+# Create xgb.DMatrix objects
+dtrain2 <- xgb.DMatrix(data = train_matrix2, label = train_reduced2$Exclusion)
+dtest2 <- xgb.DMatrix(data = test_matrix2, label = test_reduced2$Exclusion)
+
+# 3. Set up cross-validation control
+xgb_control <- trainControl(
+ method = "cv",
+ number = 5,
+ verboseIter = TRUE,
+ classProbs = TRUE,
+ summaryFunction = twoClassSummary,
+ allowParallel = TRUE
+)
+
+# 4. Define parameter grid for tuning
+xgb_grid_focused <- expand.grid(
+  nrounds = c(100, 200),
+  max_depth = c(3, 6),
+  eta = c(0.1),
+  gamma = c(0),
+  colsample_bytree = c(0.8),
+  min_child_weight = c(1),
+  subsample = c(0.8)
+)
+
+# 5. Train XGBoost model with parameter tuning
+xgb_model3 <- train(
+  x = train_matrix3,
+  y = factor(train_reduced3$Exclusion, labels = c("No", "Yes")),
+  method = "xgbTree",
+  trControl = xgb_control,
+  tuneGrid = xgb_grid_focused,
+  metric = "ROC",
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  verbose = TRUE
+)
+
+
+# 6. Make predictions
+xgb_pred3 <- predict(xgb_model3, newdata = test_matrix3)
+xgb_pred_probs3 <- predict(xgb_model3, newdata = test_matrix3, type = "prob")
+
+# 7. Evaluate model performance
+xgb_conf_matrix3 <- confusionMatrix(xgb_pred3, factor(test_reduced3$Exclusion, labels = c("No", "Yes")))
+print("Confusion Matrix:")
+print(xgb_conf_matrix3)
+
+# 8. Plot ROC curve
+xgb_roc3 <- roc(test_reduced3$Exclusion, xgb_pred_probs3[,"Yes"])
+plot(xgb_roc3, main = "ROC Curve for XGBoost Model")
+auc_value3 <- auc(xgb_roc3)
+print(paste("AUC:", auc_value3))
+
+# 9. Feature importance
+importance_matrix2 <- xgb.importance(feature_names = colnames(train_matrix2), model = xgb_model2$finalModel)
+print("Feature Importance:")
+print(importance_matrix2)
+
+# Plot feature importance
+xgb.plot.importance(importance_matrix2[1:10,])
+
+# 10. Print best tuning parameters
+print("Best Tuning Parameters:")
+print(xgb_model2$bestTune)
+
+# 11. Early stopping monitoring
+watchlist2 <- list(train = dtrain2, test = dtest2)
+
+# 12. Final model with best parameters and early stopping
+final_xgb2 <- xgb.train(
+ params = list(
+   objective = "binary:logistic",
+   max_depth = xgb_model2$bestTune$max_depth,
+   eta = xgb_model2$bestTune$eta,
+   gamma = xgb_model2$bestTune$gamma,
+   colsample_bytree = xgb_model2$bestTune$colsample_bytree,
+   min_child_weight = xgb_model2$bestTune$min_child_weight,
+   subsample = xgb_model2$bestTune$subsample
+ ),
+ data = dtrain2,
+ nrounds = xgb_model2$bestTune$nrounds,
+ watchlist = watchlist2,
+ early_stopping_rounds = 50,
+ print_every_n = 10
+)
+
+# 13. Save important metrics to file
+results2 <- data.frame(
+ AUC = auc_value2,
+ Accuracy = xgb_conf_matrix2$overall["Accuracy"],
+ Sensitivity = xgb_conf_matrix2$byClass["Sensitivity"],
+ Specificity = xgb_conf_matrix2$byClass["Specificity"]
+)
+
+write.csv(results2, "xgboost_results2.csv")
+```
+
