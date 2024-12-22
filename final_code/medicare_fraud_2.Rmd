@@ -1,0 +1,1605 @@
+---
+title: "Medicare_fraud_2"
+author: "Jean Jimenez"
+date: "2024-12-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(httr)
+library(jsonlite)
+library(sparklyr)
+library(dplyr)
+library(purrr)
+library(DBI)
+library(knitr)
+library(data.table)
+library(caret)
+library(pROC)
+library(ROSE)  
+library(ggplot2)
+library(DMwR2)
+library(smotefamily)
+```
+
+
+# IMPORT DATA
+
+```{r}
+# Import medicare_part_b
+medicare_part_b <- read.csv("medicare_part_b.csv")
+
+# Import medicare_part_d
+medicare_part_d <- read.csv("medicare_part_d.csv")
+
+# Import dmepos
+dmepos <- read.csv("dmepos.csv")
+
+# Import combined_dataset
+combined_dataset <- read.csv("combined_dataset.csv")
+```
+
+
+
+# DATA PREPROCESSING
+
+Replace NA values in exclusion column with 0
+```{r}
+medicare_part_b$Exclusion <- ifelse(is.na(medicare_part_b$Exclusion), 0, medicare_part_b$Exclusion)
+
+medicare_part_d$Exclusion <- ifelse(is.na(medicare_part_d$Exclusion), 0, medicare_part_d$Exclusion)
+
+dmepos$Exclusion <- ifelse(is.na(dmepos$Exclusion), 0, dmepos$Exclusion)
+
+combined_dataset$Exclusion <- ifelse(is.na(combined_dataset$Exclusion), 0, combined_dataset$Exclusion)
+```
+
+
+Now lets call a function to calculate the percentage of fraudulent to non-fraudulent cases
+```{r}
+calc_fraud_stats <- function(dataset){
+  total <- nrow(dataset)
+  fraud <- sum(dataset$Exclusion == 1, na.rm = TRUE)
+  non_fraud = total - fraud
+  percent_fraud = (fraud/total) * 100
+  return(c(Non_fraudulent = non_fraud,
+           Fraudulent = fraud,
+           Percent_Fraudulent= percent_fraud))
+}
+
+part_b_stats <- calc_fraud_stats(medicare_part_b)
+part_d_stats <- calc_fraud_stats(medicare_part_d)
+dmepos_stats <- calc_fraud_stats(dmepos)
+combined_stats <- calc_fraud_stats(combined_dataset)
+
+fraud_table <- data.frame(Dataset = c("Part B", "Part D", "DMEPOS", "Combined"),
+  Non_fraudulent = c(part_b_stats["Non_fraudulent"], 
+                     part_d_stats["Non_fraudulent"], 
+                     dmepos_stats["Non_fraudulent"], 
+                     combined_stats["Non_fraudulent"]),
+  Fraudulent = c(part_b_stats["Fraudulent"], 
+                 part_d_stats["Fraudulent"], 
+                 dmepos_stats["Fraudulent"], 
+                 combined_stats["Fraudulent"]),
+  Percent_Fraudulent = c(part_b_stats["Percent_Fraudulent"], 
+                         part_d_stats["Percent_Fraudulent"], 
+                         dmepos_stats["Percent_Fraudulent"], 
+                         combined_stats["Percent_Fraudulent"]))
+
+fraud_table$Percent_Fraudulent <- round(fraud_table$Percent_Fraudulent, 3)
+kable(fraud_table, format = "markdown", digits = 3)
+```
+
+So the DMEPOS has the highest percentage of Fraudulent data at 0.027% pf fraudulent data
+
+Implement one-hot-encoding for gender and provider type for Dmepos dataset
+```{r}
+
+dmepos <- dmepos %>%
+  mutate(
+    gender_male = case_when(
+      Referring_provider_gender == "M" ~ 1,
+      Referring_provider_gender == "F" ~ 0,
+      TRUE ~ 0  
+    ),
+    gender_female = case_when(
+      Referring_provider_gender == "F" ~ 1,
+      Referring_provider_gender == "M" ~ 0,
+      TRUE ~ 0  
+    )
+  )
+
+# One-hot encoding for provider type/specialty
+provider_types <- unique(dmepos$Referring_provider_type)
+
+# Create a one-hot encoded column for each provider type
+for (type in provider_types) {
+  col_name <- paste0("provider_type_", make.names(type))
+  dmepos[[col_name]] <- as.integer(dmepos$Referring_provider_type == type)
+}
+
+# Remove original categorical columns and NPI
+dmepos <- dmepos %>%
+  select(-Referring_provider_gender, -Referring_provider_type, -Referring_npi)
+
+```
+
+Implement one-hot-encoding for gender and provider type for Medicare_part_B
+```{r}
+
+medicare_part_b <- medicare_part_b %>%
+  mutate(
+    gender_male = case_when(
+      Nppes_provider_gender == "M" ~ 1,
+      Nppes_provider_gender == "F" ~ 0,
+      TRUE ~ 0  
+    ),
+    gender_female = case_when(
+      Nppes_provider_gender == "F" ~ 1,
+      Nppes_provider_gender == "M" ~ 0,
+      TRUE ~ 0  
+    )
+  )
+
+# One-hot encoding for provider type
+provider_types <- unique(medicare_part_b$Provider_type)
+for (type in provider_types) {
+  col_name <- paste0("provider_type_", make.names(type))
+  medicare_part_b[[col_name]] <- as.integer(medicare_part_b$Provider_type == type)
+}
+
+# Remove original categorical columns and NPI
+medicare_part_b <- medicare_part_b %>%
+  select(-Nppes_provider_gender, -Provider_type, -Npi)
+```
+
+
+Implement one-hot-encoding for gender and provider type for Medicare_part_D
+```{r}
+
+# One-hot encoding for specialty description
+specialty_descriptions <- unique(medicare_part_d$Specialty_description)
+for (desc in specialty_descriptions) {
+  col_name <- paste0("specialty_", make.names(desc))
+  medicare_part_d[[col_name]] <- as.integer(medicare_part_d$Specialty_description == desc)
+}
+
+# Remove original categorical column and NPI
+medicare_part_d <- medicare_part_d %>%
+  select(-Specialty_description, -Npi)
+```
+
+
+Implement one-hot-encoding for gender and provider type for Combined dataset
+```{r}
+
+# One-hot encoding for gender
+combined_dataset <- combined_dataset %>%
+  mutate(
+    gender_male = case_when(
+      Nppes_provider_gender == "M" ~ 1,
+      Nppes_provider_gender == "F" ~ 0,
+      TRUE ~ 0  
+    ),
+    gender_female = case_when(
+      Nppes_provider_gender == "F" ~ 1,
+      Nppes_provider_gender == "M" ~ 0,
+      TRUE ~ 0  
+    )
+  )
+
+# One-hot encoding for provider type
+provider_types <- unique(combined_dataset$Provider_type)
+for (type in provider_types) {
+  col_name <- paste0("provider_type_", make.names(type))
+  combined_dataset[[col_name]] <- as.integer(combined_dataset$Provider_type == type)
+}
+
+# Remove original categorical columns and NPI
+combined_dataset <- combined_dataset %>%
+  select(-Nppes_provider_gender, -Provider_type, -Npi)
+```
+
+### Binomial Logistic regression
+
+#### DMEPOS
+check for na values
+```{r}
+sum(is.na(dmepos))
+```
+No NA values, lets see the distribution of the numerical columns to check for any outliers
+```{r}
+
+# Function to plot histograms for selected columns
+plot_histograms <- function(df, columns) {
+  for (col in columns) {
+    # Create a ggplot object
+    p <- ggplot(df, aes_string(x = col)) +
+      geom_histogram(binwidth = 30, fill = "blue", color = "black", alpha = 0.7) +
+      labs(title = paste("Histogram of", col), x = col, y = "Frequency") +
+      theme_minimal()
+    
+    # Print the plot
+    print(p)
+  }
+}
+
+
+columns_to_plot <- c(
+  "avg_number_of_suppliers", 
+  "sum_number_of_suppliers", 
+  "stddev_number_of_suppliers",
+  "min_number_of_suppliers", 
+  "max_number_of_suppliers",
+  "avg_number_of_supplier_claims",
+  "sum_number_of_supplier_claims",
+  "stddev_number_of_supplier_claims",
+  "min_number_of_supplier_claims",
+  "max_number_of_supplier_claims",
+  "avg_number_of_supplier_services",
+  "sum_number_of_supplier_services",
+  "stddev_number_of_supplier_services",
+  "min_number_of_supplier_services",
+  "max_number_of_supplier_services",
+  "avg_supplier_submitted_charge",
+  "stddev_supplier_submitted_charge",
+  "min_supplier_submitted_charge",
+  "max_supplier_submitted_charge",
+  "avg_supplier_medicare_payment",
+  "stddev_supplier_medicare_payment",
+  "min_supplier_medicare_payment",
+  "max_supplier_medicare_payment"
+)
+
+plot_histograms(dmepos, columns_to_plot)
+
+```
+
+
+There are some outliers, a rule of thumb is to look out for values that are 1.5 times the iqr above the 75th ir te 25th percentile
+```{r}
+find_outliers_iqr <- function(df, column) {
+  Q1 <- quantile(df[[column]], 0.25, na.rm = TRUE)
+  Q3 <- quantile(df[[column]], 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  outliers <- df[[column]][df[[column]] < lower_bound | df[[column]] > upper_bound]
+  return(outliers)
+}
+
+```
+
+Im going to go through every numerical column specifieied, and call the find_outliers_iqr function so that every row that contains the outlier is dropped
+```{r}
+remove_outliers <- function(df, column) {
+  outliers <- find_outliers_iqr(df, column)
+  df <- df[!(df[[column]] %in% outliers), ]
+  return(df)
+}
+
+# Main loop to process all columns
+for (column in columns_to_plot) {
+  tryCatch({
+    print(paste("Processing column:", column))
+    dmepos <- remove_outliers(dmepos, column)
+    print(paste("Rows remaining after processing", column, ":", nrow(dmepos)))
+  }, error = function(e) {
+    print(paste("Error processing column:", column))
+    print(e)
+  })
+}
+```
+
+
+
+Distribution after removing outliers
+
+
+```{r}
+generate_improved_histogram <- function(data, column, log_scale = FALSE) {
+  # Convert column name to symbol for use in aes()
+  col_sym <- rlang::sym(column)
+  
+  # Create the base plot
+  p <- ggplot(data, aes(x = !!col_sym)) +
+    geom_histogram(bins = 30, fill = "blue", color = "black", alpha = 0.7) +
+    labs(title = paste("Distribution of", column),
+         x = column,
+         y = "Frequency") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  # Add a density curve
+  p <- p + geom_density(aes(y = ..count.. * 30), color = "red", size = 1)
+  
+  # Add mean and median lines
+  mean_val <- mean(data[[column]], na.rm = TRUE)
+  median_val <- median(data[[column]], na.rm = TRUE)
+  p <- p + 
+    geom_vline(aes(xintercept = mean_val), color = "green", linetype = "dashed", size = 1) +
+    geom_vline(aes(xintercept = median_val), color = "purple", linetype = "dashed", size = 1) +
+    annotate("text", x = mean_val, y = Inf, label = "Mean", vjust = 2, color = "green") +
+    annotate("text", x = median_val, y = Inf, label = "Median", vjust = 4, color = "purple")
+  
+  # Apply log scale if requested
+  if (log_scale) {
+    p <- p + scale_x_log10()
+  }
+  
+  return(p)
+}
+```
+
+
+```{r}
+generate_histograms_for_columns <- function(data, columns, output_dir = NULL, log_scale = FALSE) {
+  # Create output directory if specified
+  if (!is.null(output_dir)) {
+    dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+  }
+  
+  # List to store all plots
+  plot_list <- list()
+  
+  for (column in columns) {
+    tryCatch({
+      print(paste("Processing column:", column))
+      
+      # Generate the plot
+      plot <- generate_improved_histogram(data, column, log_scale = log_scale)
+      
+      # Add the plot to the list
+      plot_list[[column]] <- plot
+      
+      # Save the plot if output directory is specified
+      if (!is.null(output_dir)) {
+        ggsave(filename = file.path(output_dir, paste0(column, ".png")), 
+               plot = plot, width = 10, height = 6)
+      }
+      
+      # Print the plot
+      print(plot)
+      
+    }, error = function(e) {
+      warning(paste("Error processing column:", column, "\nError message:", e$message))
+    })
+  }
+  
+  # Return the list of plots
+  return(plot_list)
+}
+
+ all_plots <- generate_histograms_for_columns(dmepos, columns_to_plot, output_dir = "histogram_plots")
+```
+
+The distribution looks much better now, Time to split into test and training sets
+```{r}
+set.seed(123)  # for reproducibility
+training_indices <- createDataPartition(dmepos$Exclusion, p = 0.7, list = FALSE)
+train_data <- dmepos[training_indices, ]
+test_data <- dmepos[-training_indices, ]
+```
+
+```{r}
+table(train_data$Exclusion)
+```
+
+```{r}
+dmepos_cleaned<-dmepos
+# Step 1: Prepare the data
+dmepos_cleaned <- dmepos_cleaned %>%
+  mutate(Exclusion = as.factor(Exclusion)) %>%
+  select_if(function(col) {
+    is.numeric(col) || 
+    (is.character(col) && all(col %in% c("0", "1"))) ||
+    (is.logical(col)) ||
+    all(col %in% c(0, 1)) ||
+    names(col) == "Exclusion"
+  })
+
+dmepos_cleaned <- na.omit(dmepos_cleaned)
+```
+
+### Medicare Part D
+```{r}
+# Define columns for outlier detection (excluding 'Exclusion')
+columns_to_process <- c(
+  "avg_total_claim_count", "sum_total_claim_count", "stddev_total_claim_count",
+  "min_total_claim_count", "max_total_claim_count", "avg_30_day_fill_count",
+  "sum_30_day_fill_count", "stddev_30_day_fill_count", "min_30_day_fill_count",
+  "max_30_day_fill_count", "avg_day_supply", "sum_day_supply", "stddev_day_supply",
+  "min_day_supply", "max_day_supply", "avg_drug_cost", "sum_drug_cost",
+  "stddev_drug_cost", "min_drug_cost", "max_drug_cost", "avg_bene_count",
+  "sum_bene_count", "stddev_bene_count", "min_bene_count", "max_bene_count"
+)
+
+# Apply outlier removal to medicare_part_d
+for (column in columns_to_process) {
+  tryCatch({
+    print(paste("Processing column:", column))
+    medicare_part_d <- remove_outliers(medicare_part_d, column)
+    print(paste("Rows remaining after processing", column, ":", nrow(medicare_part_d)))
+  }, error = function(e) {
+    print(paste("Error processing column:", column))
+    print(e)
+  })
+}
+
+# Generate histograms for the processed data
+all_plots_d <- generate_histograms_for_columns(medicare_part_d, columns_to_process, output_dir = "histogram_plots_part_d")
+
+# Prepare data for modeling
+medicare_part_d_cleaned <- medicare_part_d %>%
+  mutate(Exclusion = as.factor(Exclusion)) %>%
+  select_if(function(col) {
+    is.numeric(col) || 
+    (is.character(col) && all(col %in% c("0", "1"))) ||
+    (is.logical(col)) ||
+    all(col %in% c(0, 1)) ||
+    names(col) == "Exclusion"
+  })
+
+# Remove any remaining NA values
+medicare_part_d_cleaned <- na.omit(medicare_part_d_cleaned)
+
+```
+## Now for the Medicare Part B dataset
+
+```{r}
+# Define columns for outlier detection (excluding 'Exclusion')
+columns_to_process <- c(
+  "avg_bene_unique_cnt", "sum_bene_unique_cnt", "stddev_bene_unique_cnt",
+  "min_bene_unique_cnt", "max_bene_unique_cnt", "avg_line_srvc_cnt",
+  "sum_line_srvc_cnt", "stddev_line_srvc_cnt", "min_line_srvc_cnt",
+  "max_line_srvc_cnt", "avg_bene_day_srvc_cnt", "sum_bene_day_srvc_cnt",
+  "stddev_bene_day_srvc_cnt", "min_bene_day_srvc_cnt", "max_bene_day_srvc_cnt",
+  "avg_submitted_chrg_amt", "stddev_submitted_chrg_amt", "min_submitted_chrg_amt",
+  "max_submitted_chrg_amt", "avg_medicare_payment_amt", "stddev_medicare_payment_amt",
+  "min_medicare_payment_amt", "max_medicare_payment_amt"
+)
+
+# Apply outlier removal to medicare_part_b
+for (column in columns_to_process) {
+  tryCatch({
+    print(paste("Processing column:", column))
+    medicare_part_b <- remove_outliers(medicare_part_b, column)
+    print(paste("Rows remaining after processing", column, ":", nrow(medicare_part_b)))
+  }, error = function(e) {
+    print(paste("Error processing column:", column))
+    print(e)
+  })
+}
+
+# Generate histograms for the processed data
+all_plots_b <- generate_histograms_for_columns(medicare_part_b, columns_to_process, output_dir = "histogram_plots_part_b")
+
+# Prepare data for modeling
+medicare_part_b_cleaned <- medicare_part_b %>%
+  mutate(Exclusion = as.factor(Exclusion)) %>%
+  select_if(function(col) {
+    is.numeric(col) || 
+    (is.character(col) && all(col %in% c("0", "1"))) ||
+    (is.logical(col)) ||
+    all(col %in% c(0, 1)) ||
+    names(col) == "Exclusion"
+  })
+
+# Remove any remaining NA values
+medicare_part_b_cleaned <- na.omit(medicare_part_b_cleaned)
+```
+
+### Combined Dataset
+
+```{r}
+# Data cleaning (without removing fraudulent rows)
+combined_dataset_cleaned <- combined_dataset %>%
+  mutate(Exclusion = as.factor(Exclusion)) %>%
+  select_if(function(col) {
+    is.numeric(col) || 
+    (is.character(col) && all(col %in% c("0", "1"))) ||
+    (is.logical(col)) ||
+    all(col %in% c(0, 1)) ||
+    names(col) == "Exclusion"
+  })
+
+combined_dataset_cleaned <- na.omit(combined_dataset_cleaned)
+
+```
+
+
+
+# Data Processing
+
+USING extreme undersampling
+
+
+```{r}
+# Required libraries
+library(caret)
+library(randomForest)
+library(xgboost)
+library(glmnet)
+library(pROC)
+library(dplyr)
+
+# Function to balance datasets
+process_with_balance <- function(data, target_col = "Exclusion", train_proportion = 0.7, minority_ratio = 0.3) {
+  set.seed(698)
+  
+  # Convert target to factor if it isn't already
+  data[[target_col]] <- as.factor(data[[target_col]])
+  
+  # Create train/test split
+  train_indices <- createDataPartition(data[[target_col]], p = train_proportion, list = FALSE)
+  train_data <- data[train_indices, ]
+  test_data <- data[-train_indices, ]
+  
+  # Print initial distribution
+  cat("Original training set class distribution:\n")
+  print(table(train_data[[target_col]]))
+  
+  # Get minority and majority samples
+  minority_samples <- train_data[train_data[[target_col]] == "1", ]
+  majority_samples <- train_data[train_data[[target_col]] == "0", ]
+  
+  # Calculate balanced sample sizes
+  n_minority <- nrow(minority_samples)
+  n_majority <- round(n_minority * (1 - minority_ratio) / minority_ratio)
+  
+  # Undersample majority class
+  majority_undersampled <- majority_samples[sample(nrow(majority_samples), min(n_majority, nrow(majority_samples))), ]
+  
+  # Combine and shuffle
+  train_balanced <- rbind(majority_undersampled, minority_samples)
+  train_balanced <- train_balanced[sample(nrow(train_balanced)), ]
+  
+  # Print final distribution
+  cat("\nFinal class distribution after balancing:\n")
+  print(table(train_balanced[[target_col]]))
+  
+  return(list(
+    train = train_balanced,
+    test = test_data,
+    train_original = train_data
+  ))
+}
+
+# Function to train and evaluate a single model
+train_evaluate_single_model <- function(train_data, test_data, model_type = "rf") {
+  set.seed(698)
+  
+  if(model_type == "rf") {
+    # Random Forest
+    model <- randomForest(Exclusion ~ ., 
+                         data = train_data, 
+                         ntree = 500,
+                         importance = TRUE)
+    
+    # Get predictions
+    pred_probs <- predict(model, test_data, type = "prob")
+    predictions <- predict(model, test_data)
+    
+  } else if(model_type == "xgboost") {
+    # Prepare data for XGBoost
+    train_matrix <- model.matrix(Exclusion ~ . - 1, data = train_data)
+    test_matrix <- model.matrix(Exclusion ~ . - 1, data = test_data)
+    
+    # Train XGBoost
+    model <- xgboost(data = train_matrix,
+                     label = as.numeric(train_data$Exclusion) - 1,
+                     objective = "binary:logistic",
+                     nrounds = 100,
+                     max_depth = 6,
+                     eta = 0.3,
+                     verbose = 0)
+    
+    # Get predictions
+    pred_probs <- predict(model, test_matrix)
+    predictions <- factor(ifelse(pred_probs > 0.5, "1", "0"), levels = c("0", "1"))
+    
+  } else if(model_type == "glmnet") {
+    # Prepare data for glmnet
+    x_train <- model.matrix(Exclusion ~ . - 1, data = train_data)
+    x_test <- model.matrix(Exclusion ~ . - 1, data = test_data)
+    y_train <- as.numeric(train_data$Exclusion) - 1
+    
+    # Train model
+    model <- cv.glmnet(x_train, y_train, family = "binomial", alpha = 0.5)
+    
+    # Get predictions
+    pred_probs <- predict(model, x_test, s = "lambda.min", type = "response")
+    predictions <- factor(ifelse(pred_probs > 0.5, "1", "0"), levels = c("0", "1"))
+  }
+  
+  # Calculate performance metrics
+  conf_matrix <- confusionMatrix(predictions, test_data$Exclusion)
+  if(model_type == "xgboost" || model_type == "glmnet") {
+    roc_obj <- roc(as.numeric(test_data$Exclusion) - 1, pred_probs)
+  } else {
+    roc_obj <- roc(as.numeric(test_data$Exclusion) - 1, pred_probs[,2])
+  }
+  
+  # Return results
+  return(list(
+    model = model,
+    confusion_matrix = conf_matrix,
+    auc = auc(roc_obj),
+    predictions = predictions,
+    pred_probs = pred_probs
+  ))
+}
+
+# Process all datasets
+processed_datasets <- list(
+  dmepos = process_with_balance(dmepos_cleaned, minority_ratio = 0.3),
+  part_b = process_with_balance(medicare_part_b_cleaned, minority_ratio = 0.3),
+  part_d = process_with_balance(medicare_part_d_cleaned, minority_ratio = 0.3),
+  combined = process_with_balance(combined_dataset_cleaned, minority_ratio = 0.3)
+)
+
+# Train and evaluate models for each dataset
+results <- list()
+model_types <- c("rf", "xgboost", "glmnet")
+
+for(dataset_name in names(processed_datasets)) {
+  results[[dataset_name]] <- list()
+  
+  for(model_type in model_types) {
+    cat("\nTraining", model_type, "for", dataset_name, "dataset\n")
+    
+    results[[dataset_name]][[model_type]] <- train_evaluate_single_model(
+      processed_datasets[[dataset_name]]$train,
+      processed_datasets[[dataset_name]]$test,
+      model_type
+    )
+  }
+}
+
+# Function to print results summary
+print_results_summary <- function(results) {
+  for(dataset_name in names(results)) {
+    cat("\n\nResults for", dataset_name, "dataset:\n")
+    for(model_type in names(results[[dataset_name]])) {
+      cat("\n", model_type, "model:\n")
+      cat("AUC:", round(results[[dataset_name]][[model_type]]$auc, 4), "\n")
+      cat("Accuracy:", round(results[[dataset_name]][[model_type]]$confusion_matrix$overall["Accuracy"], 4), "\n")
+      cat("Sensitivity:", round(results[[dataset_name]][[model_type]]$confusion_matrix$byClass["Sensitivity"], 4), "\n")
+      cat("Specificity:", round(results[[dataset_name]][[model_type]]$confusion_matrix$byClass["Specificity"], 4), "\n")
+    }
+  }
+}
+
+# Print results summary
+print_results_summary(results)
+```
+
+Results for dmepos dataset:
+
+ rf model:
+AUC: 0.663 
+Accuracy: 0.8871 
+Sensitivity: 0.8872 
+Specificity: 0.25 
+
+ xgboost model:
+AUC: 0.7362 
+Accuracy: 0.8045 
+Sensitivity: 0.8046 
+Specificity: 0.75 
+
+ glmnet model:
+AUC: 0.5 
+Accuracy: 0.9998 
+Sensitivity: 1 
+Specificity: 0 
+
+
+Results for part_b dataset:
+
+ rf model:
+AUC: 0.7015 
+Accuracy: 0.8945 
+Sensitivity: 0.8945 
+Specificity: 0.3333 
+
+ xgboost model:
+AUC: 0.7393 
+Accuracy: 0.8141 
+Sensitivity: 0.8142 
+Specificity: 0.5833 
+
+ glmnet model:
+AUC: 0.7497 
+Accuracy: 0.9209 
+Sensitivity: 0.9209 
+Specificity: 0.5 
+
+
+Results for part_d dataset:
+
+ rf model:
+AUC: 0.6483 
+Accuracy: 0.7674 
+Sensitivity: 0.7675 
+Specificity: 0.4444 
+
+ xgboost model:
+AUC: 0.6566 
+Accuracy: 0.7269 
+Sensitivity: 0.727 
+Specificity: 0.3333 
+
+ glmnet model:
+AUC: 0.691 
+Accuracy: 0.8904 
+Sensitivity: 0.8905 
+Specificity: 0.2222 
+
+
+Results for combined dataset:
+
+ rf model:
+AUC: 0.6321 
+Accuracy: 0.8961 
+Sensitivity: 0.8962 
+Specificity: 0.2308 
+
+ xgboost model:
+AUC: 0.6374 
+Accuracy: 0.8601 
+Sensitivity: 0.8602 
+Specificity: 0.2308 
+
+ glmnet model:
+AUC: 0.6377 
+Accuracy: 0.8452 
+Sensitivity: 0.8453 
+Specificity: 0.3077
+
+
+
+
+
+
+Looking at these results, here are the key observations:
+
+Best Overall Performance:
+
+
+XGBoost on DMEPOS: AUC = 0.736, with balanced specificity (0.75)
+GLMnet on Part B: AUC = 0.750, but less balanced specificity (0.5)
+
+
+Model Comparison:
+
+
+XGBoost generally performs best across datasets
+Random Forest shows good accuracy but lower specificity
+GLMnet shows mixed results - sometimes overfitting (DMEPOS case with 0.9998 accuracy but 0 specificity)
+
+
+Issues:
+
+
+Most models show high sensitivity but low specificity
+Class imbalance is still affecting performance (final balanced datasets still show imbalance)
+GLMnet overfitting in some cases
+
+
+# Data Processing 2
+
+Key improvements in this version:
+
+Increased minority ratio to 0.4 for better balance
+Optimized model parameters for each algorithm
+Added ensemble predictions with weighted averaging
+More robust error handling
+Improved performance metrics reporting
+Better handling of class imbalance in individual models
+
+```{r}
+# Required libraries
+library(caret)
+library(randomForest)
+library(xgboost)
+library(glmnet)
+library(pROC)
+library(dplyr)
+
+# Improved balancing function with better ratio control
+process_with_balance <- function(data, target_col = "Exclusion", train_proportion = 0.7, minority_ratio = 0.4) {
+  set.seed(123)
+  
+  # Convert target to factor
+  data[[target_col]] <- as.factor(data[[target_col]])
+  
+  # Create train/test split
+  train_indices <- createDataPartition(data[[target_col]], p = train_proportion, list = FALSE)
+  train_data <- data[train_indices, ]
+  test_data <- data[-train_indices, ]
+  
+  # Print initial distribution
+  cat("\nOriginal training set class distribution:\n")
+  print(table(train_data[[target_col]]))
+  
+  # Get minority and majority samples
+  minority_samples <- train_data[train_data[[target_col]] == "1", ]
+  majority_samples <- train_data[train_data[[target_col]] == "0", ]
+  
+  # Calculate majority sample size to achieve desired ratio
+  n_minority <- nrow(minority_samples)
+  n_majority <- round(n_minority * (1 - minority_ratio) / minority_ratio)
+  
+  # Ensure we don't sample more than available
+  n_majority <- min(n_majority, nrow(majority_samples))
+  
+  # Undersample majority class
+  majority_undersampled <- majority_samples[sample(nrow(majority_samples), n_majority), ]
+  
+  # Combine and shuffle
+  train_balanced <- rbind(majority_undersampled, minority_samples)
+  train_balanced <- train_balanced[sample(nrow(train_balanced)), ]
+  
+  # Print final distribution
+  cat("\nFinal class distribution after balancing:\n")
+  print(table(train_balanced[[target_col]]))
+  
+  return(list(
+    train = train_balanced,
+    test = test_data,
+    train_original = train_data
+  ))
+}
+
+# Improved model training function with optimized parameters
+train_evaluate_single_model <- function(train_data, test_data, model_type = "rf") {
+  set.seed(123)
+  
+  if(model_type == "rf") {
+    # Random Forest with optimized parameters
+    model <- randomForest(Exclusion ~ ., 
+                         data = train_data, 
+                         ntree = 1000,          # Increased number of trees
+                         mtry = sqrt(ncol(train_data)),
+                         sampsize = min(nrow(train_data), 1000),  # Control sample size
+                         importance = TRUE)
+    
+    pred_probs <- predict(model, test_data, type = "prob")
+    predictions <- predict(model, test_data)
+    
+  } else if(model_type == "xgboost") {
+    # Prepare data for XGBoost
+    train_matrix <- model.matrix(Exclusion ~ . - 1, data = train_data)
+    test_matrix <- model.matrix(Exclusion ~ . - 1, data = test_data)
+    
+    # XGBoost with optimized parameters
+    params <- list(
+      objective = "binary:logistic",
+      eval_metric = "auc",
+      max_depth = 4,           # Reduced to prevent overfitting
+      eta = 0.01,             # Slower learning rate
+      subsample = 0.8,        # Prevent overfitting
+      colsample_bytree = 0.8, # Prevent overfitting
+      scale_pos_weight = 3    # Weight for positive class
+    )
+    
+    model <- xgboost(data = train_matrix,
+                     label = as.numeric(train_data$Exclusion) - 1,
+                     params = params,
+                     nrounds = 300,
+                     verbose = 0)
+    
+    pred_probs <- predict(model, test_matrix)
+    predictions <- factor(ifelse(pred_probs > 0.5, "1", "0"), levels = c("0", "1"))
+    
+  } else if(model_type == "glmnet") {
+    # Prepare data for glmnet
+    x_train <- model.matrix(Exclusion ~ . - 1, data = train_data)
+    x_test <- model.matrix(Exclusion ~ . - 1, data = test_data)
+    y_train <- as.numeric(train_data$Exclusion) - 1
+    
+    # GLMnet with optimized parameters
+    model <- cv.glmnet(x_train, y_train, 
+                       family = "binomial",
+                       alpha = 0.5,      # Elastic net mixing
+                       nfolds = 5,
+                       type.measure = "auc")
+    
+    pred_probs <- predict(model, x_test, s = "lambda.1se", type = "response")
+    predictions <- factor(ifelse(pred_probs > 0.5, "1", "0"), levels = c("0", "1"))
+  }
+  
+  # Calculate performance metrics
+  conf_matrix <- confusionMatrix(predictions, test_data$Exclusion)
+  if(model_type == "xgboost" || model_type == "glmnet") {
+    roc_obj <- roc(as.numeric(test_data$Exclusion) - 1, as.numeric(pred_probs))
+  } else {
+    roc_obj <- roc(as.numeric(test_data$Exclusion) - 1, pred_probs[,2])
+  }
+  
+  return(list(
+    model = model,
+    confusion_matrix = conf_matrix,
+    auc = auc(roc_obj),
+    predictions = predictions,
+    pred_probs = pred_probs
+  ))
+}
+
+# Ensemble prediction function
+create_ensemble_predictions <- function(results, dataset_name, test_data) {
+  # Get predictions from each model
+  rf_pred <- results[[dataset_name]][["rf"]]$pred_probs[,2]
+  xgb_pred <- results[[dataset_name]][["xgboost"]]$pred_probs
+  glm_pred <- as.numeric(results[[dataset_name]][["glmnet"]]$pred_probs)
+  
+  # Weighted average (giving more weight to better performing models)
+  ensemble_pred <- (rf_pred * 0.3 + xgb_pred * 0.4 + glm_pred * 0.3)
+  
+  # Calculate ensemble metrics
+  predictions <- factor(ifelse(ensemble_pred > 0.5, "1", "0"), levels = c("0", "1"))
+  conf_matrix <- confusionMatrix(predictions, test_data$Exclusion)
+  roc_obj <- roc(as.numeric(test_data$Exclusion) - 1, ensemble_pred)
+  
+  return(list(
+    auc = auc(roc_obj),
+    confusion_matrix = conf_matrix,
+    predictions = predictions,
+    pred_probs = ensemble_pred
+  ))
+}
+
+# Process all datasets
+processed_datasets <- list(
+  dmepos = process_with_balance(dmepos_cleaned, minority_ratio = 0.4),
+  part_b = process_with_balance(medicare_part_b_cleaned, minority_ratio = 0.4),
+  part_d = process_with_balance(medicare_part_d_cleaned, minority_ratio = 0.4),
+  combined = process_with_balance(combined_dataset_cleaned, minority_ratio = 0.4)
+)
+
+# Train and evaluate models
+results <- list()
+model_types <- c("rf", "xgboost", "glmnet")
+
+for(dataset_name in names(processed_datasets)) {
+  results[[dataset_name]] <- list()
+  
+  # Train individual models
+  for(model_type in model_types) {
+    cat("\nTraining", model_type, "for", dataset_name, "dataset\n")
+    results[[dataset_name]][[model_type]] <- train_evaluate_single_model(
+      processed_datasets[[dataset_name]]$train,
+      processed_datasets[[dataset_name]]$test,
+      model_type
+    )
+  }
+  
+  # Create ensemble
+  cat("\nCreating ensemble for", dataset_name, "dataset\n")
+  results[[dataset_name]][["ensemble"]] <- create_ensemble_predictions(
+    results, 
+    dataset_name,
+    processed_datasets[[dataset_name]]$test
+  )
+}
+
+# Improved results printing function
+print_detailed_results <- function(results) {
+  for(dataset_name in names(results)) {
+    cat("\n\n=== Results for", dataset_name, "dataset ===\n")
+    for(model_type in names(results[[dataset_name]])) {
+      cat("\n", toupper(model_type), "model:\n")
+      cat("AUC:", round(results[[dataset_name]][[model_type]]$auc, 4), "\n")
+      cat("Accuracy:", round(results[[dataset_name]][[model_type]]$confusion_matrix$overall["Accuracy"], 4), "\n")
+      cat("Sensitivity:", round(results[[dataset_name]][[model_type]]$confusion_matrix$byClass["Sensitivity"], 4), "\n")
+      cat("Specificity:", round(results[[dataset_name]][[model_type]]$confusion_matrix$byClass["Specificity"], 4), "\n")
+      cat("Balanced Accuracy:", round(results[[dataset_name]][[model_type]]$confusion_matrix$byClass["Balanced Accuracy"], 4), "\n")
+    }
+  }
+}
+
+# Print detailed results
+print_detailed_results(results)
+```
+
+
+
+=== Results for dmepos dataset ===
+
+ RF model:
+AUC: 0.6231 
+Accuracy: 0.7932 
+Sensitivity: 0.7934 
+Specificity: 0.25 
+Balanced Accuracy: 0.5217 
+
+ XGBOOST model:
+AUC: 0.6496 
+Accuracy: 0.5835 
+Sensitivity: 0.5835 
+Specificity: 0.75 
+Balanced Accuracy: 0.6667 
+
+ GLMNET model:
+AUC: 0.5 
+Accuracy: 0.9998 
+Sensitivity: 1 
+Specificity: 0 
+Balanced Accuracy: 0.5 
+
+ ENSEMBLE model:
+AUC: 0.6434 
+Accuracy: 0.7617 
+Sensitivity: 0.7619 
+Specificity: 0.25 
+Balanced Accuracy: 0.5059 
+
+
+=== Results for part_b dataset ===
+
+ RF model:
+AUC: 0.6889 
+Accuracy: 0.7204 
+Sensitivity: 0.7205 
+Specificity: 0.5 
+Balanced Accuracy: 0.6102 
+
+ XGBOOST model:
+AUC: 0.7251 
+Accuracy: 0.5123 
+Sensitivity: 0.5123 
+Specificity: 0.8333 
+Balanced Accuracy: 0.6728 
+
+ GLMNET model:
+AUC: 0.5753 
+Accuracy: 0.9253 
+Sensitivity: 0.9254 
+Specificity: 0 
+Balanced Accuracy: 0.4627 
+
+ ENSEMBLE model:
+AUC: 0.7187 
+Accuracy: 0.6476 
+Sensitivity: 0.6476 
+Specificity: 0.75 
+Balanced Accuracy: 0.6988 
+
+
+=== Results for part_d dataset ===
+
+ RF model:
+AUC: 0.7464 
+Accuracy: 0.7636 
+Sensitivity: 0.7637 
+Specificity: 0.5556 
+Balanced Accuracy: 0.6596 
+
+ XGBOOST model:
+AUC: 0.7551 
+Accuracy: 0.652 
+Sensitivity: 0.652 
+Specificity: 0.7778 
+Balanced Accuracy: 0.7149 
+
+ GLMNET model:
+AUC: 0.7107 
+Accuracy: 0.8185 
+Sensitivity: 0.8186 
+Specificity: 0.5556 
+Balanced Accuracy: 0.6871 
+
+ ENSEMBLE model:
+AUC: 0.7487 
+Accuracy: 0.7121 
+Sensitivity: 0.712 
+Specificity: 0.7778 
+Balanced Accuracy: 0.7449 
+
+
+=== Results for combined dataset ===
+
+ RF model:
+AUC: 0.5448 
+Accuracy: 0.7633 
+Sensitivity: 0.7634 
+Specificity: 0.2308 
+Balanced Accuracy: 0.4971 
+
+ XGBOOST model:
+AUC: 0.5081 
+Accuracy: 0.5582 
+Sensitivity: 0.5582 
+Specificity: 0.4615 
+Balanced Accuracy: 0.5099 
+
+ GLMNET model:
+AUC: 0.5662 
+Accuracy: 0.9513 
+Sensitivity: 0.9514 
+Specificity: 0.1538 
+Balanced Accuracy: 0.5526 
+
+ ENSEMBLE model:
+AUC: 0.5295 
+Accuracy: 0.6836 
+Sensitivity: 0.6837 
+Specificity: 0.3077 
+Balanced Accuracy: 0.4957 
+
+
+
+## Results for DMEPOS Dataset
+
+- **Best Model**: XGBoost
+  - AUC: 0.6496
+  - Balanced Accuracy: 0.6667
+  - Notable for having the best specificity (0.75) while maintaining reasonable overall performance
+
+- **Model Issues**:
+  - GLMnet shows clear overfitting (0.9998 accuracy but 0 specificity)
+  - Random Forest fails to identify fraudulent cases (0.25 specificity)
+  - Ensemble model doesn't improve upon individual models
+
+## Results for Part B Dataset
+
+- **Best Model**: Ensemble
+  - AUC: 0.7187
+  - Balanced Accuracy: 0.6988
+  - Good balance between sensitivity (0.6476) and specificity (0.75)
+
+- **Individual Models**:
+  - XGBoost shows strong fraud detection (0.8333 specificity)
+  - GLMnet again shows overfitting issues
+  - Random Forest provides balanced but moderate performance
+
+## Results for Part D Dataset
+
+- **Best Overall Performance**:
+  - Most consistent results across all models
+  - All models showing AUC > 0.71
+
+- **Highlights**:
+  - XGBoost leads with AUC of 0.7551 and balanced accuracy of 0.7149
+  - Ensemble model shows strong performance (AUC: 0.7487)
+  - All models maintain reasonable specificity (>0.55)
+
+## Results for Combined Dataset
+
+- **Poorest Performance Overall**:
+  - All models show AUC barely above 0.5 (random chance)
+  - Low specificity across all models
+  - GLMnet showing overfitting pattern again
+
+## Overall Conclusions
+
+1. **Best Dataset**: Part D shows the most promising results for fraud detection
+   - Most consistent performance across models
+   - Highest AUC values
+   - Best balanced accuracy scores
+
+2. **Best Model**: XGBoost consistently performs well
+   - Better at detecting fraud (higher specificity)
+   - More balanced performance metrics
+   - Less prone to overfitting than GLMnet
+
+3. **Recommendations**:
+   - Focus on Part D dataset for future modeling
+   - Consider using XGBoost as primary model
+   - Investigate why combined dataset performs poorly
+   - Further tune GLMnet to prevent overfitting
+   - Consider different ensemble weighting schemes
+
+4. **Areas for Improvement**:
+   - Address GLMnet overfitting
+   - Improve specificity across all models
+   - Investigate why combined dataset performs poorly
+   - Consider different feature engineering approaches
+
+# DATA PROCESSING 3
+
+```{r}
+# Additional required libraries
+library(keras)
+library(tensorflow)
+library(e1071)  # for SVM
+library(caret)
+library(dplyr)
+
+# Function to normalize data for neural network
+normalize_data <- function(data, exclude_cols = "Exclusion") {
+  numeric_cols <- names(data)[!names(data) %in% exclude_cols]
+  data_norm <- data
+  
+  # Calculate normalization parameters
+  norm_params <- lapply(numeric_cols, function(col) {
+    list(
+      mean = mean(data[[col]], na.rm = TRUE),
+      sd = sd(data[[col]], na.rm = TRUE)
+    )
+  })
+  names(norm_params) <- numeric_cols
+  
+  # Normalize numeric columns
+  for (col in numeric_cols) {
+    data_norm[[col]] <- (data[[col]] - norm_params[[col]]$mean) / norm_params[[col]]$sd
+  }
+  
+  return(list(
+    normalized_data = data_norm,
+    norm_params = norm_params
+  ))
+}
+
+# Neural Network model training function
+train_neural_network <- function(train_data, test_data) {
+  # Normalize data
+  norm_result <- normalize_data(train_data)
+  train_norm <- norm_result$normalized_data
+  
+  # Prepare input data
+  x_train <- as.matrix(train_norm[, !names(train_norm) %in% "Exclusion"])
+  y_train <- to_categorical(as.numeric(train_norm$Exclusion) - 1)
+  
+  # Define model architecture
+  model <- keras_model_sequential() %>%
+    layer_dense(units = 64, activation = 'relu', input_shape = ncol(x_train)) %>%
+    layer_dropout(0.3) %>%
+    layer_dense(units = 32, activation = 'relu') %>%
+    layer_dropout(0.2) %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dense(units = 2, activation = 'softmax')
+  
+  # Compile model
+  model %>% compile(
+    optimizer = optimizer_adam(learning_rate = 0.001),
+    loss = 'binary_crossentropy',
+    metrics = c('accuracy')
+  )
+  
+  # Train model
+  history <- model %>% fit(
+    x_train, y_train,
+    epochs = 50,
+    batch_size = 32,
+    validation_split = 0.2,
+    verbose = 1
+  )
+  
+  return(list(
+    model = model,
+    norm_params = norm_result$norm_params,
+    history = history
+  ))
+}
+
+# SVM model training function
+train_svm <- function(train_data, test_data) {
+  # Convert target to factor
+  train_data$Exclusion <- as.factor(train_data$Exclusion)
+  
+  # Train SVM model
+  svm_model <- svm(Exclusion ~ ., 
+                   data = train_data,
+                   kernel = "radial",
+                   probability = TRUE,
+                   scale = TRUE)
+  
+  return(svm_model)
+}
+
+# Modified function to train all models including new ones
+train_all_models <- function(train_data, test_data) {
+  set.seed(123)
+  
+  # Train existing models
+  rf_model <- randomForest(
+    Exclusion ~ ., 
+    data = train_data,
+    ntree = 1000,
+    importance = TRUE
+  )
+  
+  xgb_model <- xgboost(
+    data = model.matrix(Exclusion ~ . - 1, train_data),
+    label = as.numeric(train_data$Exclusion) - 1,
+    nrounds = 300,
+    objective = "binary:logistic",
+    eval_metric = "auc",
+    params = list(
+      max_depth = 4,
+      eta = 0.01,
+      subsample = 0.8,
+      colsample_bytree = 0.8,
+      scale_pos_weight = 3
+    )
+  )
+  
+  glmnet_model <- cv.glmnet(
+    x = model.matrix(Exclusion ~ . - 1, train_data),
+    y = as.numeric(train_data$Exclusion) - 1,
+    family = "binomial",
+    alpha = 0.5
+  )
+  
+  # Train new models
+  nn_result <- train_neural_network(train_data, test_data)
+  svm_model <- train_svm(train_data, test_data)
+  
+  # Return all models
+  return(list(
+    rf = rf_model,
+    xgboost = xgb_model,
+    glmnet = glmnet_model,
+    neural_network = nn_result,
+    svm = svm_model
+  ))
+}
+```
+
+
+SVM and Neural Net added
+
+
+```{r}
+# Install and load neuralnet package
+#install.packages("neuralnet")
+library(neuralnet)
+# Modified Neural Network training function
+train_neural_network <- function(train_data, test_data) {
+  # Normalize data between 0 and 1 with error checking
+  normalize_01 <- function(x) {
+    if (max(x) == min(x)) return(rep(0, length(x)))  # Handle constant values
+    return((x - min(x)) / (max(x) - min(x)))
+  }
+  
+  tryCatch({
+    # Prepare training data with error checking
+    train_norm <- as.data.frame(lapply(train_data[, !names(train_data) %in% "Exclusion"], 
+                                     function(x) {
+                                       if(is.numeric(x)) normalize_01(x) 
+                                       else x
+                                     }))
+    train_norm$Exclusion <- as.numeric(train_data$Exclusion) - 1
+    
+    # Create formula for all features
+    numeric_cols <- names(train_norm)[sapply(train_norm, is.numeric)]
+    formula_str <- paste("Exclusion ~", 
+                        paste(numeric_cols[!numeric_cols %in% "Exclusion"], 
+                              collapse = " + "))
+    nn_formula <- as.formula(formula_str)
+    
+    # Train neural network with modified parameters
+    nn_model <- neuralnet(
+      formula = nn_formula,
+      data = train_norm,
+      hidden = c(5, 3),  # Reduced complexity
+      threshold = 0.2,   # Increased threshold
+      stepmax = 1e5,     # Reduced max steps
+      rep = 1,
+      linear.output = FALSE,
+      lifesign = "minimal",
+      algorithm = "rprop+",  # More stable algorithm
+      err.fct = "ce"        # Cross-entropy error function
+    )
+    
+    # Save normalization parameters
+    norm_params <- lapply(train_data[, !names(train_data) %in% "Exclusion"], function(x) {
+      if(!is.numeric(x)) return(NULL)
+      list(min = min(x), max = max(x))
+    })
+    
+    return(list(
+      model = nn_model,
+      norm_params = norm_params
+    ))
+  }, error = function(e) {
+    # Return a simple fallback model if neural network fails
+    warning("Neural network training failed, using fallback logistic regression")
+    fallback_model <- glm(Exclusion ~ ., data = train_data, family = binomial)
+    return(list(
+      model = fallback_model,
+      is_fallback = TRUE
+    ))
+  })
+}
+
+# Modified train_all_models function with better error handling
+train_all_models <- function(train_data, test_data) {
+  set.seed(123)
+  
+  models <- list()
+  
+  # Random Forest
+  tryCatch({
+    models$rf <- randomForest(
+      Exclusion ~ ., 
+      data = train_data,
+      ntree = 1000,
+      importance = TRUE,
+      sampsize = min(nrow(train_data), 1000)  # Limit sample size
+    )
+  }, error = function(e) {
+    warning("Random Forest training failed: ", e$message)
+  })
+  
+  # XGBoost
+  tryCatch({
+    models$xgboost <- xgboost(
+      data = model.matrix(Exclusion ~ . - 1, train_data),
+      label = as.numeric(train_data$Exclusion) - 1,
+      nrounds = 300,
+      objective = "binary:logistic",
+      eval_metric = "auc",
+      verbose = 0,  # Reduce output
+      params = list(
+        max_depth = 4,
+        eta = 0.01,
+        subsample = 0.8,
+        colsample_bytree = 0.8,
+        scale_pos_weight = 3
+      )
+    )
+  }, error = function(e) {
+    warning("XGBoost training failed: ", e$message)
+  })
+  
+  # GLMnet with modified parameters
+  tryCatch({
+    models$glmnet <- cv.glmnet(
+      x = model.matrix(Exclusion ~ . - 1, train_data),
+      y = as.numeric(train_data$Exclusion) - 1,
+      family = "binomial",
+      alpha = 0.5,
+      nfolds = min(3, nrow(train_data)),  # Adjust nfolds based on data size
+      grouped = TRUE  # Handle small class sizes
+    )
+  }, error = function(e) {
+    warning("GLMnet training failed: ", e$message)
+  })
+  
+  # Neural Network
+  nn_result <- train_neural_network(train_data, test_data)
+  if (!is.null(nn_result)) {
+    models$neural_network <- nn_result
+  }
+  
+  return(models)
+}
+
+# Modified save_all_models function with error checking
+save_all_models <- function(models, dataset_name, base_path = "models") {
+  dir.create(file.path(base_path, dataset_name), showWarnings = FALSE, recursive = TRUE)
+  
+  # Save each model if it exists
+  for(model_name in names(models)) {
+    if(!is.null(models[[model_name]])) {
+      tryCatch({
+        saveRDS(models[[model_name]], 
+                file = file.path(base_path, dataset_name, paste0(model_name, ".rds")))
+      }, error = function(e) {
+        warning(paste("Failed to save", model_name, "model:", e$message))
+      })
+    }
+  }
+}
+```
+
+
+
+# EXPORT
+
+## SAVE MODELS
+```{r}
+library(caret)
+library(randomForest)
+library(xgboost)
+library(glmnet)
+library(pROC)
+library(dplyr)
+library(shiny)
+library(shinydashboard)
+library(DT)
+
+
+save_all_models <- function(models, dataset_name, base_path = "models") {
+  dir.create(file.path(base_path, dataset_name), showWarnings = FALSE, recursive = TRUE)
+  
+  # Save each model
+  saveRDS(models$rf, file.path(base_path, dataset_name, "rf.rds"))
+  saveRDS(models$xgboost, file.path(base_path, dataset_name, "xgboost.rds"))
+  saveRDS(models$glmnet, file.path(base_path, dataset_name, "glmnet.rds"))
+  saveRDS(models$neural_network, file.path(base_path, dataset_name, "neural_network.rds"))
+  saveRDS(models$svm, file.path(base_path, dataset_name, "svm.rds"))
+}
+
+# Train and save models for each dataset
+process_dataset <- function(processed_datasets, dataset_name) {
+  cat("Processing", dataset_name, "dataset...\n")
+  
+  # Get training and test data
+  train_data <- processed_datasets[[dataset_name]]$train
+  test_data <- processed_datasets[[dataset_name]]$test
+  
+  # Train all models
+  models <- train_all_models(train_data, test_data)
+  
+  # Save models
+  save_all_models(models, dataset_name)
+  
+  return(models)
+}
+
+all_models <- list(
+  dmepos = process_dataset(processed_datasets, "dmepos"),
+  part_b = process_dataset(processed_datasets, "part_b"),
+  part_d = process_dataset(processed_datasets, "part_d"),
+  combined = process_dataset(processed_datasets, "combined")
+)
+
+```
+
+
+## SAMPLE DATASETS
+
+```{r}
+create_sample_datasets <- function(processed_datasets, n_samples = 100, base_path = "sample_data") {
+  dir.create(base_path, showWarnings = FALSE)
+  sample_data_list <- list()
+  
+  for(dataset_name in names(processed_datasets)) {
+    # Get original test data
+    test_data <- processed_datasets[[dataset_name]]$test
+    
+    # Sample from fraud and non-fraud cases
+    fraud_cases <- test_data[test_data$Exclusion == "1", ]
+    non_fraud_cases <- test_data[test_data$Exclusion == "0", ]
+    
+    # Take samples
+    n_fraud <- min(nrow(fraud_cases), n_samples/2)
+    n_non_fraud <- n_samples - n_fraud
+    
+    sampled_fraud <- fraud_cases[sample(nrow(fraud_cases), n_fraud), ]
+    sampled_non_fraud <- non_fraud_cases[sample(nrow(non_fraud_cases), n_non_fraud), ]
+    
+    # Combine samples
+    sample_data <- rbind(sampled_fraud, sampled_non_fraud)
+    sample_data <- sample_data[sample(nrow(sample_data)), ]  # Shuffle
+    
+    # Save to file
+    saveRDS(sample_data, 
+            file = file.path(base_path, paste0(dataset_name, "_sample.rds")))
+    
+    sample_data_list[[dataset_name]] <- sample_data
+  }
+  
+  return(sample_data_list)
+}
+```
+
+
+
+
+
+
+# EXECUTE 
+
+```{r}
+# 1. Save models
+all_models <- list(
+  dmepos = process_dataset(processed_datasets, "dmepos"),
+  part_b = process_dataset(processed_datasets, "part_b"),
+  part_d = process_dataset(processed_datasets, "part_d"),
+  combined = process_dataset(processed_datasets, "combined")
+)
+
+# 2. Create and save sample datasets
+sample_datasets <- create_sample_datasets(processed_datasets)
+```
+
